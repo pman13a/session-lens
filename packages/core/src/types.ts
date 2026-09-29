@@ -48,6 +48,10 @@ export interface Rec {
   model?: string;
   usage?: Usage;
   stopReason?: string;
+  /** Which Claude Code surface wrote the record: cli, claude-vscode, claude-desktop, remote_mobile, sdk-… */
+  entrypoint?: string;
+  /** Skills invoked here: Skill tool calls, or a /slash command typed by the user. */
+  skills?: string[];
   isMeta?: boolean;
   isHuman?: boolean;
   pieces: ContentPiece[];
@@ -100,6 +104,7 @@ export interface Request {
   /** Tools the response called. */
   tools: string[];
   stopReason?: string;
+  entrypoint?: string;
 }
 
 export interface SubagentInfo {

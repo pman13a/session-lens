@@ -1,6 +1,7 @@
 import { attribute, sessionComposition, threadRequests } from './attribution.js';
 import { account, billingPeriod, sanitizeSettings, saveSettings, type AccountInfo } from './account.js';
 import { blockText } from './parse.js';
+import { parseDailyPaste, referencePath, saveReference, usageView, type GroupBy } from './usage.js';
 import type { Store } from './store.js';
 import type { Request, Session } from './types.js';
 
@@ -349,6 +350,26 @@ export class Api {
         return this.account();
       case '/api/settings':
         return body === undefined ? { error: 'POST a JSON object' } : this.updateSettings(body);
+      case '/api/usage':
+        return usageView(this.store, {
+          from: params.get('from') ?? undefined,
+          to: params.get('to') ?? undefined,
+          group: (params.get('group') as GroupBy) ?? undefined,
+          interval: params.get('interval') === 'week' ? 'week' : 'day',
+          project: params.get('project') ?? undefined,
+        });
+      case '/api/reference': {
+        if (body === undefined || body === null || typeof body !== 'object') return { error: 'POST a JSON object' };
+        const b = body as { paste?: unknown; year?: unknown; days?: Record<string, unknown> };
+        const patch: Record<string, unknown> = { ...b };
+        if (typeof b.paste === 'string') {
+          const parsed = parseDailyPaste(b.paste, typeof b.year === 'number' ? b.year : new Date().getUTCFullYear());
+          patch.days = { ...(b.days ?? {}), ...parsed };
+          delete patch.paste;
+        }
+        saveReference(referencePath(this.store.settingsPath), patch);
+        return { ok: true };
+      }
       case '/api/composition':
         this.store.refresh();
         return { points: sessionComposition(this.store, params.get('id') ?? '') };

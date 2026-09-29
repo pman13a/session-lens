@@ -6,3 +6,4 @@ export { attribute, apportion, sessionComposition, type CompositionPoint, thread
 export { Api, type DayRow, type SessionRow, type Query } from './api.js';
 export { createServer, type ServerOptions } from './server.js';
 export { account, detectAccount, billingFor, billingPeriod, sanitizeSettings, saveSettings, DEFAULT_SETTINGS_PATH, type AccountInfo } from './account.js';
+export { usageView, utcPeriod, utcDay, utcWeek, parseDailyPaste, saveReference, loadReference, referencePath, surfaceLabel, PRODUCTS, type Reference, type UsageQuery, type GroupBy, type ProductKey } from './usage.js';

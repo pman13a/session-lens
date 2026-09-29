@@ -55,6 +55,25 @@ npm start               # opens http://127.0.0.1:4317
 - Subagent transcripts live in `<session>/subagents/agent-*.jsonl` with a `.meta.json`. They stay on their own thread (never merged into the parent's context) and are grouped under the prompt whose tool call launched them.
 - Current models have a 1M context window (Haiku 4.5 has 200K). Nothing assumes 200K.
 
+## Usage limits: check it against Claude's own page
+
+The **Usage limits** tab mirrors the Enterprise/Team usage page in claude.ai (Settings → Usage) so the two can be compared number for number:
+
+- The same header ("$X of $Y spent", spend limit, reset time, % used), the same **Group by** (Product, plus Model, Project and Surface), **Daily / Weekly**, and the same date range, defaulting to the current period.
+- The same conventions: **dates in UTC**, the period resets at 00:00 UTC, and "vs prior period" compares with the same number of days just before.
+- The same **Product · Spend · % of total · vs prior period** table and **Top skills** (through yesterday, UTC).
+
+**Enter dashboard figures** stores the dashboard's own numbers in `~/.session-lens/reference.json`, on this computer only:
+- the header total and limit,
+- the product table for the selected range,
+- optionally each day's Claude Code value, pasted in any common format.
+
+The page then shows them side by side and splits the gap into signed terms: days with no local usage, days reading lower, and days reading higher. A reading higher than the dashboard is a red flag for double counting. A steady ratio across days points to a rate difference, which a discount under **Plan…** fixes. A varying ratio points to usage from the cloud or another computer.
+
+Chat, Cowork and Claude in Chrome leave no local records, so for those rows the dashboard is the only source.
+
+![Usage limits](docs/5-usage-limits.png)
+
 ## Plan-aware cost
 
 Session Lens asks Claude Code which account is logged in (`claude auth status --json`, which never exposes credentials) and labels cost to match:

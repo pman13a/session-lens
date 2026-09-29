@@ -254,6 +254,7 @@ export class Store {
           promptId: nearestPrompt(r),
           tools: r.pieces.filter((p) => p.kind === 'tool_use').map((p) => p.label),
           stopReason: r.stopReason,
+          entrypoint: r.entrypoint,
         };
         this.requests.set(req.id, req);
         (sub ? sub.requestIds : s.requestIds).push(req.id);

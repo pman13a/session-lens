@@ -146,6 +146,36 @@ export interface CompositionPoint {
   byKind: Partial<Record<ItemKind, number>>;
 }
 
+export interface UsageSeries {
+  key: string;
+  label: string;
+  values: number[];
+  total: number;
+  share: number;
+  prior: number;
+  change: number | null;
+  requests: number;
+  local: boolean;
+}
+
+export interface UsageView {
+  range: { from: string; to: string; days: number; prior: { from: string; to: string }; timeZone: string };
+  group: 'product' | 'model' | 'project' | 'surface';
+  interval: 'day' | 'week';
+  buckets: string[];
+  series: UsageSeries[];
+  total: number;
+  period: { start: string; end: string; resetsAt: string; spent: number; limit: number | null };
+  skills: { name: string; uses: number; sessions: number }[];
+  skillsThrough: string;
+  reference: {
+    period: { spent?: number; limit?: number };
+    range: Partial<Record<'claude_code' | 'chat' | 'cowork' | 'chrome', number>>;
+    rangeKey: string;
+    days: Record<string, number>;
+  };
+}
+
 interface VsCodeApi {
   postMessage(msg: unknown): void;
 }

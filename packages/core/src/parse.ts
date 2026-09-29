@@ -133,6 +133,18 @@ function attachmentPieces(d: Json): ContentPiece[] {
   return [{ kind: 'attachment', label: type, detail: oneLine(text.replace(/<\/?system-reminder>/g, ''), 100), chars: text.length, block: 0 }];
 }
 
+/** Skill tool calls, and `/name` commands typed by the user (`<command-name>/name</command-name>`). */
+function skillsIn(d: Json, rec: Rec): string[] {
+  const out: string[] = [];
+  if (rec.type === 'assistant') {
+    for (const p of rec.pieces) if (p.kind === 'tool_use' && p.label === 'Skill' && p.detail) out.push(p.detail);
+  } else if (rec.type === 'user') {
+    const text = textOf(d.message?.content);
+    for (const m of text.matchAll(/<command-name>\/?([^<\s]+)<\/command-name>/g)) out.push(m[1]);
+  }
+  return out;
+}
+
 export interface FileLocation {
   sessionId: string;
   agentId?: string;
@@ -201,6 +213,7 @@ export function parseTranscript(path: string, text: string, stat: { mtimeMs: num
       ts,
       line,
       promptId: d.promptId,
+      entrypoint: d.entrypoint,
       pieces: [],
     };
     if (type === 'user') {
@@ -218,6 +231,8 @@ export function parseTranscript(path: string, text: string, stat: { mtimeMs: num
     } else if (type === 'attachment') {
       rec.pieces = attachmentPieces(d);
     }
+    const skills = skillsIn(d, rec);
+    if (skills.length) rec.skills = skills;
     idx.records.push(rec);
   }
   if (!idx.title && firstPrompt) idx.title = oneLine(firstPrompt, 90);

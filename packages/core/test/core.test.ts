@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Api, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, Pricer, sanitizeSettings, sessionComposition, Store } from '../src/index.js';
+import { Api, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
 
 /* ---------- fixture builder ---------- */
 
@@ -352,5 +352,72 @@ describe('billing', () => {
     expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({ billing: 'subscription', planPrice: 100, discount: 0.5 });
     const back = api.updateSettings({ billing: 'auto' }) as { overridden: boolean };
     expect(back.overridden).toBe(false);
+  });
+});
+
+describe('dashboard view (matches Claude’s usage page)', () => {
+  function store(settingsPath = join(mkdtempSync(join(tmpdir(), 'sl-u-')), 'settings.json')) {
+    const t = new Transcript('s1', { entrypoint: 'claude-vscode' });
+    t.t = Date.parse('2026-09-01T23:30:00Z'); // 6:30 PM CDT Sep 1, but Sep 1 in UTC
+    t.prompt('a');
+    t.response('u1', usage(1_000_000, 0, 0, 0), [{ type: 'tool_use', id: 'k1', name: 'Skill', input: { skill: 'dataviz' } }]);
+    t.t = Date.parse('2026-09-02T00:30:00Z'); // still Sep 1 in CDT, Sep 2 in UTC
+    t.prompt('b');
+    t.response('u2', usage(500_000, 0, 0, 0), [{ type: 'text', text: 'ok' }]);
+    t.t = Date.parse('2026-08-20T12:00:00Z'); // prior period
+    const early = new Transcript('s0');
+    early.t = Date.parse('2026-08-20T12:00:00Z');
+    early.prompt('c');
+    early.response('u0', usage(250_000, 0, 0, 0), [{ type: 'text', text: 'ok' }]);
+    const st = new Store({ roots: [writeProject({ 's1.jsonl': t.text(), 's0.jsonl': early.text() })], settings: {}, settingsPath });
+    st.refresh(0);
+    return st;
+  }
+  const NOW = Date.parse('2026-09-03T15:00:00Z');
+
+  it('buckets by UTC day, fills empty days, and compares with the prior period', () => {
+    const v = usageView(store(), { from: '2026-09-01', to: '2026-09-03' }, NOW);
+    expect(v.buckets).toEqual(['2026-09-01', '2026-09-02', '2026-09-03']);
+    const cc = v.series.find((s) => s.key === 'claude_code')!;
+    expect(cc.values.map((x) => +x.toFixed(2))).toEqual([4, 2, 0]); // Opus 5.5 input $4/M
+    expect(v.series.map((s) => s.key)).toEqual(['claude_code', 'chat', 'cowork', 'chrome']);
+    expect(v.series.find((s) => s.key === 'chat')!.local).toBe(false);
+    expect(v.range.prior).toEqual({ from: '2026-08-29', to: '2026-08-31' });
+  });
+
+  it('groups by surface and rolls days into Monday weeks', () => {
+    const v = usageView(store(), { from: '2026-08-17', to: '2026-09-03', group: 'surface', interval: 'week' }, NOW);
+    expect(v.buckets).toEqual(['2026-08-17', '2026-08-24', '2026-08-31']);
+    expect(v.series.map((s) => s.label).sort()).toEqual(['Unknown', 'VS Code']);
+    expect(utcWeek('2026-09-06')).toBe('2026-08-31'); // Sunday → its Monday
+  });
+
+  it('resets at 00:00 UTC on the period start day and counts top skills through yesterday', () => {
+    expect(utcPeriod(NOW)).toEqual({ start: '2026-09-01', end: '2026-09-30', resetsAt: '2026-10-01T00:00:00.000Z' });
+    const v = usageView(store(), {}, NOW);
+    expect(v.range.from).toBe('2026-09-01');
+    expect(v.period.spent).toBeCloseTo(6);
+    expect(v.skills).toEqual([{ name: 'dataviz', uses: 1, sessions: 1 }]);
+  });
+
+  it('parses daily figures pasted in the usual shapes', () => {
+    expect(parseDailyPaste('2026-09-01 58.20\nSep 3: $22.10\n9/7, 22.4\nSeptember 17\t$1,054.00\ngarbage', 2026)).toEqual({
+      '2026-09-01': 58.2,
+      '2026-09-03': 22.1,
+      '2026-09-07': 22.4,
+      '2026-09-17': 1054,
+    });
+  });
+
+  it('stores the dashboard’s own figures next to ours', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'sl-r-')), 'settings.json');
+    const st = store(path);
+    const api = new Api(st);
+    api.handle('/api/reference', new URLSearchParams(), { period: { start: '2026-09-01', spent: 300.04, limit: 300 }, range: { key: '2026-09-01..2026-09-03', values: { claude_code: 5.5, chat: 1.25, evil: 9 } }, paste: 'Sep 1 3.80\nSep 2 1.70', year: 2026 });
+    const v = usageView(st, { from: '2026-09-01', to: '2026-09-03' }, NOW);
+    expect(v.reference.period).toEqual({ spent: 300.04, limit: 300 });
+    expect(v.reference.range).toEqual({ claude_code: 5.5, chat: 1.25 });
+    expect(v.reference.days).toEqual({ '2026-09-01': 3.8, '2026-09-02': 1.7 });
+    expect(v.period.limit).toBe(300);
   });
 });

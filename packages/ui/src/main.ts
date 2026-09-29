@@ -1,6 +1,6 @@
 import './style.css';
-import { api, saveFile, type AccountState, type BillingMode, type CompositionPoint, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
-import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll } from './charts';
+import { api, saveFile, type AccountState, type BillingMode, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
+import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll, usageChart, usageColors } from './charts';
 import { daysAgo, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
 /* ---------- tiny DOM helper: text always goes in as textContent ---------- */
@@ -96,7 +96,7 @@ function rangeParams(): { from?: string; to?: string; project?: string } {
 /* ---------- routing ---------- */
 
 interface Route {
-  view: 'overview' | 'day' | 'session' | 'request';
+  view: 'overview' | 'day' | 'session' | 'request' | 'usage';
   id?: string;
   params: URLSearchParams;
 }
@@ -110,6 +110,7 @@ function parseRoute(): Route {
   if (view === 'day' && id) return { view: 'day', id, params };
   if (view === 'session' && id) return { view: 'session', id, params };
   if (view === 'request' && id) return { view: 'request', id, params };
+  if (view === 'usage') return { view: 'usage', params };
   return { view: 'overview', params };
 }
 
@@ -206,7 +207,14 @@ function shell() {
         'header',
         { class: 'top' },
         h('h1', {}, lensIcon(), 'Session Lens'),
-        h('div', { class: 'filters' }, rangeSeg, projectSel, billingSlot),
+        h(
+          'div',
+          { class: 'seg', role: 'tablist', 'aria-label': 'View' },
+          h('button', { role: 'tab', 'aria-pressed': String(parseRoute().view !== 'usage'), onclick: () => go('#/') }, 'Explorer'),
+          h('button', { role: 'tab', 'aria-pressed': String(parseRoute().view === 'usage'), onclick: () => go('#/usage') }, 'Usage limits'),
+        ),
+        // The Usage limits page has its own range control (UTC, like Claude's page), so hide the Explorer's.
+        h('div', { class: 'filters' }, parseRoute().view === 'usage' ? null : rangeSeg, projectSel, billingSlot),
         h('div', { class: 'spacer' }),
         refreshBtn,
         themeBtn,
@@ -966,6 +974,388 @@ async function showRaw(requestId: string, item: ContextItem) {
 }
 document.addEventListener('keydown', (e) => e.key === 'Escape' && closeRaw());
 
+
+/* ---------- Usage limits: a 1:1 counterpart of Claude's own usage page, for checking this tool ---------- */
+
+type UsageRange = 'period' | 'last-period' | '7d' | '30d' | 'custom';
+const usageState = {
+  range: store.get('u.range', 'period') as UsageRange,
+  from: store.get('u.from', ''),
+  to: store.get('u.to', ''),
+  group: store.get('u.group', 'product') as UsageView['group'],
+  interval: store.get('u.interval', 'day') as UsageView['interval'],
+};
+
+const utcToday = () => new Date().toISOString().slice(0, 10);
+const utcAdd = (d: string, n: number) => new Date(Date.parse(d + 'T00:00:00Z') + n * 86_400_000).toISOString().slice(0, 10);
+const utcLabel = (d: string, withYear = false) =>
+  new Date(d + 'T00:00:00Z').toLocaleDateString([], { month: 'long', day: 'numeric', ...(withYear ? { year: 'numeric' } : {}), timeZone: 'UTC' });
+
+function usageRangeParams(period?: { start: string }): { from?: string; to?: string } {
+  const today = utcToday();
+  switch (usageState.range) {
+    case '7d':
+      return { from: utcAdd(today, -6), to: today };
+    case '30d':
+      return { from: utcAdd(today, -29), to: today };
+    case 'last-period': {
+      if (!period) return {};
+      const end = utcAdd(period.start, -1);
+      const d = new Date(period.start + 'T00:00:00Z');
+      const start = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, d.getUTCDate())).toISOString().slice(0, 10);
+      return { from: start, to: end };
+    }
+    case 'custom':
+      return usageState.from && usageState.to ? { from: usageState.from, to: usageState.to } : {};
+    default:
+      return {}; // the current spend period through today
+  }
+}
+
+function rangeText(from: string, to: string) {
+  const f = new Date(from + 'T00:00:00Z');
+  const t = new Date(to + 'T00:00:00Z');
+  if (f.getUTCFullYear() === t.getUTCFullYear() && f.getUTCMonth() === t.getUTCMonth()) return `${utcLabel(from)} – ${t.getUTCDate()}`;
+  return `${utcLabel(from)} – ${utcLabel(to)}`;
+}
+
+function signedPct(x: number | null): string {
+  if (x == null || !Number.isFinite(x)) return '—';
+  return `${x > 0 ? '+' : ''}${(x * 100).toFixed(1)}%`;
+}
+
+function signedUSD(x: number): string {
+  return `${x > 0 ? '+' : x < 0 ? '−' : ''}${fmtUSD(Math.abs(x))}`;
+}
+
+let lastPeriodStart: { start: string } | undefined;
+
+async function usageLimitsView(token: number) {
+  const params = { ...usageRangeParams(lastPeriodStart), group: usageState.group, interval: usageState.interval, project: state.project || undefined };
+  const v = await api<UsageView>('usage', params);
+  if (token !== renderToken) return;
+  lastPeriodStart = v.period;
+  setCrumbs([{ label: 'Usage limits' }]);
+  const plan = acct?.account.subscriptionType ? acct.account.subscriptionType.replace(/^./, (c) => c.toUpperCase()) : acct ? MODE_LABEL[acct.mode] : '';
+
+  /* header: $X of $Y spent · resets … */
+  const limit = v.period.limit;
+  const spent = v.period.spent;
+  const pct = limit ? spent / limit : 0;
+  const resets = new Date(v.period.resetsAt).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+  const dash = v.reference.period;
+  const barColor = pct >= 0.9 ? cssVar('--critical') : pct >= 0.7 ? cssVar('--warning') : cssVar('--accent');
+  const header = h(
+    'section',
+    { class: 'card' },
+    h('div', { class: 'card-head' }, h('div', {}, h('h2', { style: { fontSize: '16px' } }, 'Your usage limits ', h('span', { class: 'muted', style: { fontWeight: '500' } }, plan)))),
+    h(
+      'div',
+      { style: { display: 'flex', gap: '24px', alignItems: 'center', flexWrap: 'wrap' } },
+      h(
+        'div',
+        { style: { minWidth: '260px', flex: '1' } },
+        h('div', { style: { fontSize: '16px', fontWeight: '600' } }, limit ? `${fmtUSD(spent)} of ${fmtUSD(limit)} spent` : `${fmtUSD(spent)} spent`),
+        h('div', { class: 'muted' }, `${limit ? 'Spend limit' : 'No spend limit set'} · Resets ${resets}`),
+        h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } }, 'Session Lens estimate: Claude Code on this computer, this period (UTC).'),
+        dash.spent != null
+          ? h(
+              'div',
+              { style: { marginTop: '6px' } },
+              h('b', {}, `Dashboard: ${fmtUSD(dash.spent)}${dash.limit ? ` of ${fmtUSD(dash.limit)}` : ''}`),
+              h('span', { class: 'muted' }, ' · Session Lens is ', h('span', { style: { whiteSpace: 'nowrap' } }, signedUSD(spent - dash.spent)), ` (${fmtPct(dash.spent ? spent / dash.spent : 0)} of it, all products)`),
+            )
+          : null,
+      ),
+      limit
+        ? h(
+            'div',
+            { style: { flex: '2', minWidth: '240px', display: 'flex', alignItems: 'center', gap: '16px' } },
+            h('div', { style: { flex: '1', height: '8px', borderRadius: '4px', background: cssVar('--surface-2'), overflow: 'hidden' } }, h('div', { style: { width: `${Math.min(pct, 1) * 100}%`, height: '100%', background: barColor, borderRadius: '4px' } })),
+            h('span', {}, `${Math.round(pct * 100)}% used`),
+          )
+        : h('button', { class: 'btn', onclick: openPlanDrawer }, 'Set spend limit'),
+    ),
+  );
+
+  /* controls: Group by · Daily/Weekly · range */
+  const persist = () => {
+    store.set('u.range', usageState.range);
+    store.set('u.from', usageState.from);
+    store.set('u.to', usageState.to);
+    store.set('u.group', usageState.group);
+    store.set('u.interval', usageState.interval);
+    render();
+  };
+  const groupSel = h(
+    'select',
+    { 'aria-label': 'Group by', onchange: (e: Event) => ((usageState.group = (e.target as HTMLSelectElement).value as UsageView['group']), persist()) },
+    ...(
+      [
+        ['product', 'Product'],
+        ['model', 'Model'],
+        ['project', 'Project'],
+        ['surface', 'Surface'],
+      ] as const
+    ).map(([k, l]) => h('option', { value: k, selected: usageState.group === k ? 'selected' : null }, `Group by ${l}`)),
+  );
+  const intervalSeg = seg(
+    [
+      { key: 'day', label: 'Daily' },
+      { key: 'week', label: 'Weekly' },
+    ],
+    usageState.interval,
+    (k) => ((usageState.interval = k as UsageView['interval']), persist()),
+  );
+  const rangeSel = h(
+    'select',
+    {
+      'aria-label': 'Date range',
+      onchange: (e: Event) => {
+        usageState.range = (e.target as HTMLSelectElement).value as UsageRange;
+        if (usageState.range === 'custom' && !usageState.from) [usageState.from, usageState.to] = [v.range.from, v.range.to];
+        persist();
+      },
+    },
+    h('option', { value: 'period', selected: usageState.range === 'period' ? 'selected' : null }, usageState.range === 'period' ? rangeText(v.range.from, v.range.to) : 'This period'),
+    h('option', { value: 'last-period', selected: usageState.range === 'last-period' ? 'selected' : null }, 'Last period'),
+    h('option', { value: '7d', selected: usageState.range === '7d' ? 'selected' : null }, 'Last 7 days'),
+    h('option', { value: '30d', selected: usageState.range === '30d' ? 'selected' : null }, 'Last 30 days'),
+    h('option', { value: 'custom', selected: usageState.range === 'custom' ? 'selected' : null }, 'Custom…'),
+  );
+  const custom =
+    usageState.range === 'custom'
+      ? [
+          h('input', { type: 'date', value: usageState.from, 'aria-label': 'From (UTC)', onchange: (e: Event) => ((usageState.from = (e.target as HTMLInputElement).value), persist()) }),
+          h('input', { type: 'date', value: usageState.to, 'aria-label': 'To (UTC)', onchange: (e: Event) => ((usageState.to = (e.target as HTMLInputElement).value), persist()) }),
+        ]
+      : [];
+  const controls = h(
+    'div',
+    { class: 'filters', style: { marginBottom: '16px' } },
+    groupSel,
+    intervalSeg,
+    h('div', { class: 'spacer' }),
+    ...custom,
+    rangeSel,
+    h('button', { class: 'btn', onclick: () => openReferenceDrawer(v) }, 'Enter dashboard figures'),
+  );
+
+  /* chart */
+  const noun = { product: 'product', model: 'model', project: 'project', surface: 'surface' }[v.group];
+  const colors = usageColors(v);
+  const chartEl = h('div', { class: 'chart' });
+  const hasRefDays = Object.keys(v.reference.days).length > 0;
+  const chartCard = card(
+    `${v.interval === 'week' ? 'Weekly' : 'Daily'} spend by ${noun}`,
+    'Dates in UTC',
+    exportButtons(`usage-${v.range.from}-${v.range.to}`, () =>
+      v.buckets.map((bk, i) => ({ [v.interval === 'week' ? 'week' : 'day']: bk, ...Object.fromEntries(v.series.map((s) => [s.label, +s.values[i].toFixed(4)])), ...(hasRefDays && v.interval === 'day' ? { dashboard: v.reference.days[bk] ?? '' } : {}) })),
+    ),
+    chartEl,
+    legend([...v.series.map((s, i) => ({ label: s.label, color: colors[i] })), ...(hasRefDays ? [{ label: 'Dashboard (entered)', color: cssVar('--text-secondary') }] : [])]),
+  );
+
+  /* table: Product · Spend · % of total · vs prior period (+ Dashboard · Difference when entered) */
+  const ref = v.reference.range;
+  const hasRef = v.group === 'product' && Object.keys(ref).length > 0;
+  type Row = UsageView['series'][number] & { color: string };
+  const rows: Row[] = v.series.map((s, i) => ({ ...s, color: colors[i] })).filter((s) => v.group === 'product' || s.total > 0);
+  const cols: Col<Row>[] = [
+    { key: 'label', label: noun[0].toUpperCase() + noun.slice(1), cell: (r) => h('span', {}, h('span', { class: 'key', style: { background: r.color, borderRadius: '50%' } }), r.label) },
+    { key: 'spend', label: 'Spend', num: true, sort: (r) => r.total, cell: (r) => (r.local ? fmtUSD(r.total) : h('span', { class: 'muted', title: 'Not recorded on this computer' }, 'not local')) },
+    { key: 'share', label: '% of total', num: true, sort: (r) => r.share, cell: (r) => (r.local ? `${(r.share * 100).toFixed(1)}%` : '—') },
+    { key: 'change', label: 'vs prior period', num: true, sort: (r) => r.change ?? -Infinity, cell: (r) => (r.local ? h('span', { title: `${fmtUSD(r.prior)} in ${rangeText(v.range.prior.from, v.range.prior.to)}` }, signedPct(r.change)) : '—') },
+  ];
+  if (hasRef)
+    cols.push(
+      { key: 'dash', label: 'Dashboard', num: true, cell: (r) => (ref[r.key as keyof typeof ref] != null ? fmtUSD(ref[r.key as keyof typeof ref]!) : h('span', { class: 'muted' }, '—')) },
+      {
+        key: 'diff',
+        label: 'Difference',
+        num: true,
+        cell: (r) => {
+          const d = ref[r.key as keyof typeof ref];
+          if (d == null || !r.local) return h('span', { class: 'muted' }, '—');
+          return h('span', { title: `${fmtPct(d ? r.total / d : 0)} of the dashboard` }, signedUSD(r.total - d));
+        },
+      },
+    );
+  const tableCard = card(
+    '',
+    null,
+    [],
+    table(rows, cols, { initial: v.group === 'product' ? undefined : 'spend' }),
+    v.group === 'product' ? h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '8px' } }, 'Chat, Cowork and Claude in Chrome leave no local records; enter their dashboard figures to compare totals.') : null,
+  );
+
+  /* top skills */
+  const skillsCard = card(
+    'Top skills',
+    `Through ${utcLabel(v.skillsThrough)} (yesterday, UTC)`,
+    [],
+    v.skills.length
+      ? table(v.skills.slice(0, 15), [
+          { key: 'name', label: 'Skill', cell: (x) => h('span', { class: 'mono' }, x.name) },
+          { key: 'uses', label: 'Uses', num: true, cell: (x) => x.uses },
+          { key: 'sessions', label: 'Sessions', num: true, cell: (x) => x.sessions },
+        ])
+      : h('div', { class: 'muted' }, 'No skills used in this range.'),
+  );
+
+  main.replaceChildren(header, controls, chartCard, tableCard, reconcileCard(v), skillsCard);
+  if (v.series.some((s) => s.total > 0) || hasRefDays) usageChart(chartEl, v, (bk) => go(`#/day/${bk}`));
+  else chartEl.replaceChildren(h('div', { class: 'empty' }, 'No Claude Code spend in this range.'));
+}
+
+/** Where Session Lens and the dashboard disagree, split into signed terms that add up to the gap. */
+function reconcileCard(v: UsageView): Node {
+  const cc = v.series.find((s) => s.key === 'claude_code');
+  const days = Object.entries(v.reference.days).sort(([a], [b]) => a.localeCompare(b));
+  const ours = new Map<string, number>();
+  if (cc) v.buckets.forEach((bk, i) => ours.set(bk, cc.values[i]));
+  const refCC = v.reference.range.claude_code;
+  const kids: Child[] = [];
+  const causes = h(
+    'ul',
+    { style: { margin: '6px 0 0', paddingLeft: '18px', color: cssVar('--text-secondary'), fontSize: '13px' } },
+    h('li', {}, 'Claude Code on the web and cloud sessions started from the app run in Anthropic’s cloud; their transcripts never reach this computer.'),
+    h('li', {}, 'Other computers signed in to the same account (sync their ~/.claude/projects to include them).'),
+    h('li', {}, 'Small internal calls Claude Code makes (e.g. summarising fetched pages) are billed but not written to transcripts.'),
+    h('li', {}, 'Your organisation’s rates: set a discount or price overrides under Plan… if every day reads high or low by the same ratio.'),
+  );
+  if (!days.length && refCC == null && v.reference.period.spent == null) {
+    return card(
+      'Check against Claude’s dashboard',
+      'Type in the numbers from claude.ai → Settings → Usage to test this tool against the source of truth',
+      [h('button', { class: 'btn', onclick: () => openReferenceDrawer(v) }, 'Enter dashboard figures')],
+      h('div', { class: 'muted' }, 'Session Lens only sees Claude Code sessions that ran on this computer. Expected sources of difference:'),
+      causes,
+    );
+  }
+  if (refCC != null && cc)
+    kids.push(
+      h(
+        'div',
+        { class: 'tiles', style: { marginBottom: '8px' } },
+        tile('Dashboard: Claude Code', fmtUSD(refCC), rangeText(v.range.from, v.range.to)),
+        tile('Session Lens: Claude Code', fmtUSD(cc.total), 'this computer'),
+        tile('Difference', signedUSD(cc.total - refCC), refCC ? `${fmtPct(cc.total / refCC)} of the dashboard` : ''),
+      ),
+    );
+  if (days.length && v.interval === 'day') {
+    let missing = 0;
+    let under = 0;
+    let over = 0;
+    const ratios: number[] = [];
+    const rows = days.map(([d, dash]) => {
+      const mine = ours.get(d) ?? 0;
+      const diff = mine - dash;
+      if (mine === 0 && dash > 0) missing += diff;
+      else if (diff < 0) under += diff;
+      else over += diff;
+      if (mine > 0 && dash > 0) ratios.push(mine / dash);
+      return { d, dash, mine, diff };
+    });
+    ratios.sort((a, b) => a - b);
+    const med = ratios.length ? ratios[ratios.length >> 1] : undefined;
+    const spread = ratios.length > 2 ? ratios[Math.floor(ratios.length * 0.8)] - ratios[Math.floor(ratios.length * 0.2)] : undefined;
+    const verdict =
+      med == null
+        ? 'No day has spend on both sides yet.'
+        : spread != null && spread < 0.1
+          ? `On days both saw usage, Session Lens reads a steady ${med.toFixed(2)}× the dashboard: that points to a rate difference (discount or pricing), not missing data.`
+          : `On days both saw usage, Session Lens reads ${med.toFixed(2)}× the dashboard (median); the ratio varies, which points to usage from other computers or the cloud on those days.`;
+    kids.push(
+      h(
+        'div',
+        { class: 'note' },
+        `Across ${rows.length} entered days the gap is ${signedUSD(missing + under + over)}: `,
+        h('b', {}, `${signedUSD(missing)}`),
+        ' on days with no local usage, ',
+        h('b', {}, `${signedUSD(under)}`),
+        ' where local reads lower, ',
+        h('b', {}, `${signedUSD(over)}`),
+        ' where local reads higher. ',
+        verdict,
+        over > 0.01 ? ' A local reading above the dashboard is worth a look: it can mean double counting.' : '',
+      ),
+      table(rows, [
+        { key: 'd', label: 'Day (UTC)', sort: (r) => r.d, cell: (r) => utcLabel(r.d, true) },
+        { key: 'dash', label: 'Dashboard', num: true, sort: (r) => r.dash, cell: (r) => fmtUSD(r.dash) },
+        { key: 'mine', label: 'Session Lens', num: true, sort: (r) => r.mine, cell: (r) => fmtUSD(r.mine) },
+        { key: 'diff', label: 'Difference', num: true, sort: (r) => r.diff, cell: (r) => signedUSD(r.diff) },
+        { key: 'ratio', label: 'Ratio', num: true, sort: (r) => (r.dash ? r.mine / r.dash : 0), cell: (r) => (r.dash && r.mine ? `${(r.mine / r.dash).toFixed(2)}×` : '—') },
+      ], { initial: 'd', desc: false, onRow: (r) => go(`#/day/${r.d}`) }),
+    );
+  } else if (days.length) {
+    kids.push(h('div', { class: 'muted' }, 'Switch to Daily to compare day by day.'));
+  }
+  kids.push(h('div', { class: 'muted', style: { marginTop: '10px' } }, 'Why the two can differ:'), causes);
+  return card('Check against Claude’s dashboard', 'Numbers you entered from claude.ai → Settings → Usage, next to Session Lens', [h('button', { class: 'btn', onclick: () => openReferenceDrawer(v) }, 'Edit figures')], ...kids);
+}
+
+function openReferenceDrawer(v: UsageView) {
+  closeRaw();
+  const num = (val: number | undefined | null, placeholder = '') => h('input', { type: 'number', step: '0.01', min: '0', value: val == null ? '' : String(val), placeholder }) as HTMLInputElement;
+  const read = (i: HTMLInputElement) => (i.value.trim() === '' ? null : Number(i.value));
+  const field = (label: string, input: HTMLElement, hint?: string) =>
+    h('label', { style: { display: 'grid', gap: '4px', marginBottom: '12px' } }, h('span', { style: { fontWeight: '600' } }, label), input, hint ? h('span', { class: 'muted', style: { fontSize: '12px' } }, hint) : null);
+  const spent = num(v.reference.period.spent, 'e.g. 300.04');
+  const limit = num(v.reference.period.limit ?? v.period.limit, 'e.g. 300.00');
+  const prod = {
+    claude_code: num(v.reference.range.claude_code),
+    chat: num(v.reference.range.chat),
+    cowork: num(v.reference.range.cowork),
+    chrome: num(v.reference.range.chrome),
+  };
+  const existing = Object.entries(v.reference.days).map(([d, x]) => `${d} ${x.toFixed(2)}`).join('\n');
+  const paste = h('textarea', { rows: '8', placeholder: 'One day per line, e.g.\n2026-09-01 58.20\nSep 3 22.10', style: { width: '100%', font: '12px var(--mono)', padding: '8px', borderRadius: '8px', border: `1px solid ${cssVar('--border')}`, background: cssVar('--surface-1'), color: 'inherit' } }) as HTMLTextAreaElement;
+  paste.value = existing;
+  const status = h('span', { class: 'muted' });
+  const save = async () => {
+    try {
+      // Replace the range's days with what is in the box (so deleting a line removes it).
+      const clear: Record<string, null> = {};
+      for (const d of Object.keys(v.reference.days)) clear[d] = null;
+      await api('reference', {}, {
+        period: { start: v.period.start, spent: read(spent), limit: read(limit) },
+        range: { key: v.reference.rangeKey, values: Object.fromEntries(Object.entries(prod).map(([k, i]) => [k, read(i)])) },
+        days: clear,
+        paste: paste.value,
+        year: Number(v.range.to.slice(0, 4)),
+      });
+      if (read(limit) != null && acct && acct.settings.monthlyLimit == null) await api('settings', {}, { monthlyLimit: read(limit) });
+      closeRaw();
+      render();
+    } catch (e) {
+      status.textContent = String(e);
+    }
+  };
+  drawer = h(
+    'aside',
+    { class: 'raw', role: 'dialog', 'aria-label': 'Dashboard figures' },
+    h('header', {}, h('span', { class: 't' }, 'Dashboard figures'), h('button', { class: 'btn', onclick: closeRaw }, 'Close')),
+    h(
+      'div',
+      { style: { padding: '16px', overflow: 'auto', flex: '1' } },
+      h('div', { class: 'note' }, 'Copy these from claude.ai → Settings → Usage. They are stored only on this computer (~/.session-lens/reference.json) and used for the comparison.'),
+      h('h3', { style: { fontSize: '13px', margin: '8px 0' } }, `Header, period starting ${utcLabel(v.period.start, true)}`),
+      field('Spent ($)', spent, 'The “$X of $Y spent” figure.'),
+      field('Spend limit ($)', limit),
+      h('h3', { style: { fontSize: '13px', margin: '16px 0 8px' } }, `Product table, ${rangeText(v.range.from, v.range.to)} (set the same range on the dashboard)`),
+      field('Claude Code', prod.claude_code),
+      field('Chat', prod.chat),
+      field('Cowork', prod.cowork),
+      field('Claude in Chrome', prod.chrome),
+      h('h3', { style: { fontSize: '13px', margin: '16px 0 8px' } }, 'Daily Claude Code spend (optional)'),
+      field('Hover each bar on the dashboard and note its Claude Code value', paste, 'Any of: 2026-09-01 58.20 · Sep 1: $58.20 · 9/1, 58.20. Dates are UTC, as on the dashboard.'),
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, h('button', { class: 'btn', onclick: save, style: { fontWeight: '600' } }, 'Save'), status),
+    ),
+  );
+  document.body.append(drawer);
+}
+
 /* ---------- render loop ---------- */
 
 async function render() {
@@ -985,6 +1375,7 @@ async function render() {
     if (route.view === 'overview') await overview(token);
     else if (route.view === 'day') await dayView(token, route.id!);
     else if (route.view === 'session') await sessionView(token, route.id!, route.params.get('day') ?? undefined);
+    else if (route.view === 'usage') await usageLimitsView(token);
     else await requestView(token, route.id!, route.params);
   } catch (e) {
     if (token === renderToken) main.replaceChildren(h('div', { class: 'empty err' }, `Could not load: ${String(e)}`));
@@ -997,6 +1388,9 @@ async function render() {
 }
 
 shell();
-window.addEventListener('hashchange', render);
+window.addEventListener('hashchange', () => {
+  shell();
+  render();
+});
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render());
 render();

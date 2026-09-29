@@ -2,7 +2,7 @@ import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
 import { DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
-import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, RequestRow } from './api';
+import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, RequestRow, UsageView } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
 echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer]);
@@ -420,6 +420,82 @@ export function compositionChart(el: HTMLElement, points: CompositionPoint[], mo
     const idx = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
     const i = idx?.[0];
     if (i != null && points[i]) onReq(points[i].id);
+  });
+  return chart;
+}
+
+/* ---------- dashboard view: spend by product/model/… per UTC day or week ---------- */
+
+/** Series colours for the dashboard view: products keep fixed slots; other groupings go by stable order. */
+export function usageColors(view: UsageView): string[] {
+  const PRODUCT_SLOT: Record<string, number> = { claude_code: 1, chat: 2, cowork: 3, chrome: 4 };
+  return view.series.map((s, i) => (view.group === 'product' ? series(PRODUCT_SLOT[s.key] ?? 8) : i < 8 ? series(i + 1) : cssVar('--other')));
+}
+
+export function usageChart(el: HTMLElement, view: UsageView, onBucket: (bucket: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  const colors = usageColors(view);
+  const shown = view.series.map((s, i) => ({ s, i })).filter(({ s }) => s.total > 0);
+  const top = shown.length - 1;
+  const refByBucket = view.buckets.map((bk, i) => {
+    if (view.interval === 'day') return view.reference.days[bk] ?? null;
+    const next = view.buckets[i + 1];
+    const vals = Object.entries(view.reference.days).filter(([d]) => d >= bk && (!next || d < next));
+    return vals.length ? vals.reduce((a, [, v]) => a + v, 0) : null;
+  });
+  const hasRef = refByBucket.some((v) => v != null);
+  const label = (bk: string) => {
+    const d = new Date(bk + 'T00:00:00Z');
+    const md = d.toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return view.interval === 'week' ? `Week of ${md}` : md;
+  };
+  const seriesOpts: object[] = shown.map(({ s, i }, k) => ({
+    name: s.label,
+    type: 'bar',
+    stack: 'spend',
+    barMaxWidth: 24,
+    data: s.values,
+    itemStyle: { color: colors[i], borderColor: surface, borderWidth: 1, borderRadius: k === top ? [4, 4, 0, 0] : 0 },
+  }));
+  if (hasRef)
+    seriesOpts.push({
+      name: 'Dashboard (entered)',
+      type: 'line',
+      data: refByBucket,
+      connectNulls: false,
+      symbol: 'circle',
+      symbolSize: 8,
+      lineStyle: { width: 2, color: cssVar('--text-secondary') },
+      itemStyle: { color: cssVar('--text-secondary'), borderColor: surface, borderWidth: 2 },
+      z: 5,
+    });
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 8, top: 16, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'shadow', shadowStyle: { color: cssVar('--wash') } },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        const tot = shown.reduce((a, { s }) => a + s.values[i], 0);
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">${label(view.buckets[i])} (UTC) · ${fmtUSD(tot)}</div>` +
+          [...shown].reverse().map(({ s, i: si }) => row(colors[si], s.label, fmtUSD(s.values[i]))).join('') +
+          (refByBucket[i] != null ? row(cssVar('--text-secondary'), 'Dashboard (entered)', fmtUSD(refByBucket[i]!)) : '')
+        );
+      },
+    },
+    xAxis: { type: 'category', data: view.buckets, ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: string) => label(v).replace('Week of ', '') } },
+    yAxis: { type: 'value', ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    series: seriesOpts,
+  });
+  chart.getZr().on('click', (e) => {
+    const idx = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    const i = idx?.[0];
+    if (i != null && view.buckets[i]) onBucket(view.buckets[i]);
   });
   return chart;
 }

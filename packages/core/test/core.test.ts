@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Api, apportion, attribute, normalizeModel, Pricer, Store } from '../src/index.js';
+import { Api, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, Pricer, sanitizeSettings, sessionComposition, Store } from '../src/index.js';
 
 /* ---------- fixture builder ---------- */
 
@@ -253,7 +253,7 @@ describe('server', () => {
     const t = new Transcript('s1');
     t.prompt('hi');
     t.response('req_a', usage(10, 0, 100, 10), [{ type: 'text', text: 'ok' }]);
-    const store = new Store({ roots: [writeProject({ 's1.jsonl': t.text() })], settings: { timeZone: 'UTC' } });
+    const store = new Store({ roots: [writeProject({ 's1.jsonl': t.text() })], settings: { timeZone: 'UTC' }, settingsPath: join(mkdtempSync(join(tmpdir(), 'sl-')), 'settings.json') });
     const ui = mkdtempSync(join(tmpdir(), 'session-lens-ui-'));
     writeFileSync(join(ui, 'index.html'), '<!doctype html><title>x</title>');
     const { server, url } = await createServer({ uiDir: ui, store, port: 0 });
@@ -275,8 +275,82 @@ describe('server', () => {
       expect((await get(`localhost:${port}`, '/')).status).toBe(200);
       expect((await get(`evil.example:${port}`, '/api/summary')).status).toBe(403);
       expect((await get(`127.0.0.1:${port}`, '/../../etc/passwd')).body).toContain('<title>x</title>');
+      const post = (headers: Record<string, string>, body: string) =>
+        new Promise<number>((resolve, reject) => {
+          const r = http.request({ host: '127.0.0.1', port, path: '/api/settings', method: 'POST', headers: { host: `127.0.0.1:${port}`, ...headers } }, (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          });
+          r.on('error', reject);
+          r.end(body);
+        });
+      // A cross-site "simple" POST (text/plain, foreign Origin) must not change settings.
+      expect(await post({ 'content-type': 'text/plain', origin: 'https://evil.example' }, '{"billing":"api"}')).toBe(403);
+      expect(await post({ 'content-type': 'application/json', origin: 'https://evil.example' }, '{"billing":"api"}')).toBe(403);
     } finally {
       server.close();
     }
+  });
+});
+
+describe('context composition over time', () => {
+  it('splits every request’s measured input by kind, summing exactly', () => {
+    const t = new Transcript('s1');
+    t.attachment('skill_listing', 'x'.repeat(3000));
+    t.prompt('go');
+    t.response('c1', usage(5, 0, 10000, 50), [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/a.ts' } }]);
+    t.toolResult('t1', 'y'.repeat(20000));
+    t.response('c2', usage(5, 10000, 9000, 50), [{ type: 'text', text: 'done' }]);
+    const store = makeStore({ 's1.jsonl': t.text() });
+    const pts = sessionComposition(store, 's1');
+    expect(pts.map((p) => p.id)).toEqual(['c1', 'c2']);
+    for (const p of pts) expect(Object.values(p.byKind).reduce((a, b) => a + (b ?? 0), 0)).toBe(p.total);
+    expect(pts[1].byKind.tool_result ?? 0).toBeGreaterThan(pts[0].byKind.tool_result ?? 0);
+  });
+});
+
+describe('billing', () => {
+  it('maps the logged-in account to a billing mode', () => {
+    expect(billingFor({ authMethod: 'claude.ai', apiProvider: 'firstParty', subscriptionType: 'max' }).mode).toBe('subscription');
+    expect(billingFor({ authMethod: 'claude.ai', apiProvider: 'firstParty', subscriptionType: 'enterprise', orgName: 'Acme' })).toEqual({ mode: 'team', label: 'Enterprise · Acme' });
+    expect(billingFor({ authMethod: 'api_key', apiProvider: 'firstParty' }).mode).toBe('api');
+    expect(billingFor({ authMethod: 'none', apiProvider: 'bedrock' }).mode).toBe('api');
+  });
+
+  it('reads `claude auth status --json`, and falls back when the CLI is missing', () => {
+    const cli = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'a@b.c', orgId: 'o', orgName: 'Me', subscriptionType: 'pro' });
+    const a = detectAccount(() => cli);
+    expect(a).toMatchObject({ source: 'claude-cli', detected: 'subscription', label: 'Pro plan', subscriptionType: 'pro' });
+    const b = detectAccount(() => undefined);
+    expect(['config', 'none']).toContain(b.source);
+  });
+
+  it('only accepts known settings with sane values', () => {
+    expect(sanitizeSettings({ billing: 'team', planPrice: 200, evil: 1, periodStartDay: 40 })).toEqual({ billing: 'team', planPrice: 200, periodStartDay: undefined });
+    expect(sanitizeSettings({ billing: 'auto' })).toEqual({ billing: undefined });
+    expect(sanitizeSettings({ billing: 'free-money' })).toEqual({ billing: undefined });
+  });
+
+  it('computes the billing period around today', () => {
+    expect(billingPeriod(new Date(2026, 8, 29), 1)).toMatchObject({ start: '2026-09-01', end: '2026-09-30', days: 30, daysElapsed: 29 });
+    expect(billingPeriod(new Date(2026, 8, 10), 15)).toMatchObject({ start: '2026-08-15', end: '2026-09-14', days: 31 });
+  });
+
+  it('saves overrides from the UI and reports spend in the period', () => {
+    const t = new Transcript('s1');
+    t.t = Date.now() - 60_000;
+    t.prompt('hi');
+    t.response('b1', usage(1_000_000, 0, 0, 0), [{ type: 'text', text: 'ok' }]);
+    const settingsPath = join(mkdtempSync(join(tmpdir(), 'session-lens-settings-')), 'settings.json');
+    const store = new Store({ roots: [writeProject({ 's1.jsonl': t.text() })], settings: {}, settingsPath });
+    store.refresh(0);
+    const api = new Api(store);
+    const res = api.updateSettings({ billing: 'subscription', planPrice: 100, discount: 0.5 }) as { mode: string; settings: { planPrice: number }; period: { cost: number } };
+    expect(res.mode).toBe('subscription');
+    expect(res.settings.planPrice).toBe(100);
+    expect(res.period.cost).toBeCloseTo(2); // 1M Opus 5.5 input at $4, half off
+    expect(JSON.parse(readFileSync(settingsPath, 'utf8'))).toEqual({ billing: 'subscription', planPrice: 100, discount: 0.5 });
+    const back = api.updateSettings({ billing: 'auto' }) as { overridden: boolean };
+    expect(back.overridden).toBe(false);
   });
 });

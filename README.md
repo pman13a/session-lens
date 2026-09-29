@@ -35,7 +35,7 @@ npm start               # opens http://127.0.0.1:4317
 |---|---|---|
 | Overview | Cost or tokens per day, stacked by input / cache write / cache read / output. Totals, sessions in range, CSV/JSON export | a day |
 | Day | That day's sessions: context-growth sparkline, peak context %, tokens, cost | a session |
-| Session | Context size per request (main thread and subagents, against the context limit), cost per request split by component, each prompt with the requests that answered it, subagents | a request |
+| Session | **What filled the context over time** (stacked by kind, in tokens or % of context, per thread), context size per request against the limit, cost per request split by component, each prompt with the requests that answered it, subagents | a request |
 | Request | Measured totals, a composition bar, a treemap and ranked table of every context line item, "added this turn" filter, prev/next, and the response's own blocks | an item, to read its raw text |
 
 ## How the numbers are made
@@ -55,12 +55,39 @@ npm start               # opens http://127.0.0.1:4317
 - Subagent transcripts live in `<session>/subagents/agent-*.jsonl` with a `.meta.json`. They stay on their own thread (never merged into the parent's context) and are grouped under the prompt whose tool call launched them.
 - Current models have a 1M context window (Haiku 4.5 has 200K). Nothing assumes 200K.
 
+## Plan-aware cost
+
+Session Lens asks Claude Code which account is logged in (`claude auth status --json`, which never exposes credentials) and labels cost to match:
+
+| Account | Headline | Billing period card |
+|---|---|---|
+| API key, Bedrock, Vertex | **Spend** at API prices | Spend against your monthly budget, if you set one |
+| Pro / Max | **API-equivalent value**: what the usage would cost on the API | Value so far against your plan fee |
+| Team / Enterprise | **Usage at API rates** | Spend against the monthly allowance |
+
+The **Billing** menu in the header overrides the detected mode, and **Plan…** sets the plan price, monthly limit, period start day and discount. Changes are saved to `~/.session-lens/settings.json` and shared by the browser, VS Code and desktop versions.
+
+Pro and Max limits are 5-hour and weekly usage windows. Transcripts don't record the percentage used; only claude.ai → Settings → Usage shows it.
+
+## What it covers
+
+It covers Claude Code sessions that ran **on this computer**: the terminal, VS Code, JetBrains, the desktop app's Code tab, and Remote Control sessions hosted here. It does not see:
+
+- Claude Code on the web or cloud sessions started from the phone app, which run in Anthropic's cloud, so their transcripts never reach this machine.
+- Other computers, unless you copy or sync their `~/.claude/projects` and pass every folder with `--projects a,b`. Duplicates are removed automatically.
+- claude.ai chat, the desktop or mobile chat apps, and Cowork. On Pro/Max these draw on the same limits but leave no local transcripts.
+- Small internal calls, such as the model that summarizes WebFetch results, which Claude Code bills but doesn't write to the transcript.
+
 ## Settings
 
 `~/.session-lens/settings.json` (optional):
 
 ```json
 {
+  "billing": "subscription",
+  "planPrice": 200,
+  "monthlyLimit": 500,
+  "periodStartDay": 1,
   "discount": 0.1,
   "timeZone": "America/Chicago",
   "prices": { "claude-opus-5-5": { "input": 4, "output": 20 } }

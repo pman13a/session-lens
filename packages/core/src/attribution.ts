@@ -134,7 +134,8 @@ export function threadProfile(store: Store, req: Request): ThreadProfile {
   return profile;
 }
 
-export function attribute(store: Store, requestId: string): Attribution | undefined {
+/** `diff: false` skips the "added this turn" comparison (one fewer chain walk) for bulk use. */
+export function attribute(store: Store, requestId: string, opts: { diff?: boolean } = {}): Attribution | undefined {
   const req = store.requests.get(requestId);
   if (!req) return undefined;
   const prof = threadProfile(store, req);
@@ -153,7 +154,7 @@ export function attribute(store: Store, requestId: string): Attribution | undefi
 
   const prevStep = pos > 0 ? prof.steps[pos - 1] : undefined;
   const prevIds = new Set<string>();
-  if (prevStep) {
+  if (prevStep && opts.diff !== false) {
     const prev = store.requests.get(prevStep.id)!;
     for (const { rec, piece } of piecesOf(store.chain(prev.file, prev.firstUuid))) prevIds.add(`${rec.uuid}:${piece.block}`);
   }
@@ -270,4 +271,36 @@ export function attribute(store: Store, requestId: string): Attribution | undefi
     addedTokens: items.filter((i) => i.added).reduce((a, i) => a + i.tokens, 0),
     charsPerToken: cpt,
   };
+}
+
+export interface CompositionPoint {
+  id: string;
+  ts: number;
+  agentId?: string;
+  total: number;
+  contextLimit: number;
+  /** Measured input split by item kind; always sums to `total`. */
+  byKind: Partial<Record<ItemKind, number>>;
+}
+
+const compositions = new Map<string, CompositionPoint[]>();
+
+/** What filled the context on every request of a session (main thread and subagents). */
+export function sessionComposition(store: Store, sessionId: string): CompositionPoint[] {
+  const key = `${store.version}:${sessionId}`;
+  const hit = compositions.get(key);
+  if (hit) return hit;
+  const s = store.sessions.get(sessionId);
+  if (!s) return [];
+  const out: CompositionPoint[] = [];
+  for (const req of store.sessionRequests(s)) {
+    const a = attribute(store, req.id, { diff: false });
+    if (!a) continue;
+    const byKind: Partial<Record<ItemKind, number>> = {};
+    for (const i of a.items) byKind[i.kind] = (byKind[i.kind] ?? 0) + i.tokens;
+    out.push({ id: req.id, ts: req.ts, agentId: req.agentId, total: a.measuredInput, contextLimit: req.contextLimit, byKind });
+  }
+  for (const k of compositions.keys()) if (!k.startsWith(`${store.version}:`)) compositions.delete(k);
+  compositions.set(key, out);
+  return out;
 }

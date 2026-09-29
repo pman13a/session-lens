@@ -1,6 +1,6 @@
 import './style.css';
-import { api, saveFile, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
-import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll } from './charts';
+import { api, saveFile, type AccountState, type BillingMode, type CompositionPoint, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
+import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll } from './charts';
 import { daysAgo, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
 /* ---------- tiny DOM helper: text always goes in as textContent ---------- */
@@ -52,6 +52,41 @@ const state = {
   dailyMode: store.get('dailyMode', 'cost') as 'tokens' | 'cost',
   projects: [] as string[],
 };
+
+/* ---------- billing: how usage becomes money for the logged-in account ---------- */
+
+let acct: AccountState | undefined;
+const MODE_LABEL: Record<BillingMode, string> = {
+  api: 'Pay per token (API)',
+  subscription: 'Subscription (Pro/Max)',
+  team: 'Team / Enterprise',
+};
+
+/** On a subscription the dollars are what the usage *would* cost on the API, not a bill. */
+function costWord(): string {
+  return acct?.mode === 'subscription' ? 'API value' : 'Cost';
+}
+
+async function setBilling(patch: Record<string, unknown>) {
+  acct = await api<AccountState>('settings', {}, patch);
+  render();
+}
+
+let billingSlot: HTMLElement;
+function drawBilling() {
+  if (!billingSlot) return;
+  if (!acct) {
+    billingSlot.replaceChildren();
+    return;
+  }
+  const sel = h(
+    'select',
+    { 'aria-label': 'Billing', title: 'How cost is shown. Auto follows the account Claude Code is logged in with.', onchange: (e: Event) => setBilling({ billing: (e.target as HTMLSelectElement).value }) },
+    h('option', { value: 'auto', selected: acct.overridden ? null : 'selected' }, `Auto: ${acct.account.label}`),
+    ...(['api', 'subscription', 'team'] as BillingMode[]).map((m) => h('option', { value: m, selected: acct!.overridden && acct!.mode === m ? 'selected' : null }, MODE_LABEL[m])),
+  );
+  billingSlot.replaceChildren(sel, h('button', { class: 'btn', onclick: openPlanDrawer, title: 'Plan price, monthly limit, billing period' }, 'Plan…'));
+}
 
 function rangeParams(): { from?: string; to?: string; project?: string } {
   const r = RANGES.find((x) => x.key === state.range);
@@ -159,6 +194,8 @@ function shell() {
     'Theme',
   );
   const refreshBtn = h('button', { class: 'btn', onclick: () => render() }, 'Refresh');
+  billingSlot = h('span', { class: 'filters' });
+  drawBilling();
   crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' });
   main = h('main');
   app.replaceChildren(
@@ -169,7 +206,7 @@ function shell() {
         'header',
         { class: 'top' },
         h('h1', {}, lensIcon(), 'Session Lens'),
-        h('div', { class: 'filters' }, rangeSeg, projectSel),
+        h('div', { class: 'filters' }, rangeSeg, projectSel, billingSlot),
         h('div', { class: 'spacer' }),
         refreshBtn,
         themeBtn,
@@ -347,6 +384,135 @@ function table<T>(rows: T[], cols: Col<T>[], opts: { onRow?: (r: T) => void; ini
   return wrap;
 }
 
+/* ---------- billing tiles ---------- */
+
+function rangeDays(sum: Summary): number {
+  const r = RANGES.find((x) => x.key === state.range);
+  if (r?.days) return r.days;
+  if (!sum.range.first || !sum.range.last) return 1;
+  return Math.round((Date.parse(sum.range.last) - Date.parse(sum.range.first)) / 86_400_000) + 1;
+}
+
+function heroCostTile(cost: number, sum: Summary) {
+  const mode = acct?.mode ?? 'api';
+  const disc = sum.discount ? ` after ${fmtPct(sum.discount)} discount` : '';
+  if (mode === 'subscription') {
+    const price = acct?.settings.planPrice;
+    const days = rangeDays(sum);
+    const fee = price ? (price * days) / 30 : 0;
+    const sub = price ? `${(cost / fee).toFixed(1)}× the ${fmtUSD(fee)} of plan fee for ${days === 1 ? 'this day' : `these ${days} days`}` : 'what this usage would cost on the API';
+    return tile('API-equivalent value', fmtUSD(cost), sub, true);
+  }
+  if (mode === 'team') return tile('Usage at API rates', fmtUSD(cost), `billed per token on Team / Enterprise${disc}`, true);
+  return tile('Spend', fmtUSD(cost), sum.discount ? `at API list prices${disc}` : 'at API list prices', true);
+}
+
+/** Where this billing period stands: spend against a limit, or value against the plan fee. */
+function periodCard(): Node | undefined {
+  if (!acct) return undefined;
+  const p = acct.period;
+  const head = `${fmtDay(p.start)} – ${fmtDay(p.end)} · day ${p.daysElapsed} of ${p.days}`;
+  const setBtn = h('button', { class: 'btn', onclick: openPlanDrawer }, 'Plan…');
+  if (acct.mode === 'subscription') {
+    const price = acct.settings.planPrice;
+    return card(
+      'This billing period',
+      head,
+      [setBtn],
+      h(
+        'div',
+        { class: 'tiles', style: { marginBottom: '8px' } },
+        tile('API-equivalent value so far', fmtUSD(p.cost), `on pace for ${fmtUSD(p.projected)}`),
+        price ? tile('Versus your plan', `${(p.cost / price).toFixed(1)}×`, `${fmtUSD(price)}/mo plan`) : tile('Versus your plan', '—', 'set your plan price under Plan…'),
+      ),
+      h('div', { class: 'note', style: { marginBottom: '0' } }, 'Pro and Max limits are 5-hour and weekly usage windows, not dollars. The exact percentage left is only shown on claude.ai under Settings → Usage; transcripts do not record it.'),
+    );
+  }
+  const limit = acct.settings.monthlyLimit;
+  if (!limit)
+    return card('This billing period', head, [setBtn], h('div', { class: 'muted' }, `${fmtUSD(p.cost)} so far, on pace for ${fmtUSD(p.projected)}. Set a monthly limit under Plan… to track it.`));
+  const pct = p.cost / limit;
+  const cls = pct >= 0.9 ? 'meter crit' : pct >= 0.7 ? 'meter warn' : 'meter';
+  return card(
+    'This billing period',
+    head,
+    [setBtn],
+    h(
+      'div',
+      { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
+      h('b', { style: { fontSize: '20px' } }, `${fmtUSD(p.cost)} of ${fmtUSD(limit)}`),
+      h('span', { class: cls, style: { width: '240px', height: '10px', borderRadius: '5px' } }, h('div', { style: { width: `${Math.min(pct, 1) * 100}%` } })),
+      h('span', {}, fmtPct(pct)),
+      h('span', { class: 'muted' }, `on pace for ${fmtUSD(p.projected)} by ${fmtDay(p.end)}${p.projected > limit ? ' · over the limit' : ''}`),
+    ),
+  );
+}
+
+/* ---------- plan settings drawer ---------- */
+
+function openPlanDrawer() {
+  if (!acct) return;
+  closeRaw();
+  const a = acct.account;
+  const st = acct.settings;
+  const field = (label: string, input: HTMLElement, hint?: string) =>
+    h('label', { style: { display: 'grid', gap: '4px', marginBottom: '14px' } }, h('span', { style: { fontWeight: '600' } }, label), input, hint ? h('span', { class: 'muted', style: { fontSize: '12px' } }, hint) : null);
+  const billing = h(
+    'select',
+    {},
+    h('option', { value: 'auto', selected: st.billing === 'auto' ? 'selected' : null }, `Auto: ${a.label}`),
+    ...(['api', 'subscription', 'team'] as BillingMode[]).map((m) => h('option', { value: m, selected: st.billing === m ? 'selected' : null }, MODE_LABEL[m])),
+  );
+  const num = (v: number | null | undefined, attrs: Record<string, string> = {}) => h('input', { type: 'number', value: v == null ? '' : String(v), min: '0', step: 'any', ...attrs }) as HTMLInputElement;
+  const price = num(st.planPrice, { placeholder: 'e.g. 20, 100 or 200' });
+  const limit = num(st.monthlyLimit, { placeholder: 'e.g. 500' });
+  const startDay = num(st.periodStartDay, { min: '1', max: '28', step: '1' });
+  const discount = num(st.discount ? Math.round(st.discount * 100) : null, { max: '100', step: '1', placeholder: '0' });
+  const status = h('span', { class: 'muted' });
+  const read = (i: HTMLInputElement) => (i.value.trim() === '' ? null : Number(i.value));
+  const save = async () => {
+    const d = read(discount);
+    try {
+      acct = await api<AccountState>('settings', {}, {
+        billing: billing.value,
+        planPrice: read(price),
+        monthlyLimit: read(limit),
+        periodStartDay: read(startDay),
+        discount: d == null ? null : d / 100,
+      });
+      closeRaw();
+      shell();
+      render();
+    } catch (e) {
+      status.textContent = String(e);
+    }
+  };
+  const detected = [
+    `Detected: ${a.label}`,
+    a.orgName ? `Organization: ${a.orgName}` : '',
+    a.email ? `Account: ${a.email}` : '',
+    a.source === 'claude-cli' ? 'Source: claude auth status' : a.source === 'config' ? 'Source: ~/.claude.json (plan not reported)' : 'Source: no Claude Code login found',
+  ].filter(Boolean);
+  drawer = h(
+    'aside',
+    { class: 'raw', role: 'dialog', 'aria-label': 'Plan settings' },
+    h('header', {}, h('span', { class: 't' }, 'Plan & billing'), h('button', { class: 'btn', onclick: closeRaw }, 'Close')),
+    h(
+      'div',
+      { style: { padding: '16px', overflow: 'auto', flex: '1' } },
+      h('div', { class: 'note' }, ...detected.flatMap((l, i) => (i ? [h('br'), l] : [l]))),
+      field('Billing', billing, 'Auto follows the account Claude Code is logged in with. Pick one to override it.'),
+      field('Plan price ($ per month)', price, 'Pro and Max: compares API-equivalent value with what you pay.'),
+      field('Monthly limit ($)', limit, 'Team / Enterprise allowance, or your own API budget.'),
+      field('Billing period starts on day', startDay),
+      field('Discount (%)', discount, 'Negotiated rate off API list prices, if any.'),
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, h('button', { class: 'btn', onclick: save, style: { fontWeight: '600' } }, 'Save'), status),
+      h('p', { class: 'muted', style: { fontSize: '12px' } }, 'Saved to ~/.session-lens/settings.json and shared by the browser, VS Code and desktop versions.'),
+    ),
+  );
+  document.body.append(drawer);
+}
+
 /* ---------- level 1: overview ---------- */
 
 async function overview(token: number) {
@@ -367,13 +533,15 @@ async function overview(token: number) {
     h(
       'div',
       { class: 'tiles' },
-      tile('Estimated cost', fmtUSD(t.cost), sum.discount ? `after ${fmtPct(sum.discount)} discount` : 'at API list prices', true),
+      heroCostTile(t.cost, sum),
       tile('Sessions', fmtInt(t.sessions), `${fmtInt(t.requests)} requests`),
       tile('Input tokens', fmtTokens(inTokens), `${fmtPct(inTokens ? t.cacheRead / inTokens : 0)} served from cache`),
       tile('Output tokens', fmtTokens(t.output)),
       tile('Days active', String(sum.days.length), sum.range.first ? `data from ${fmtDay(sum.range.first)}` : 'no data'),
     ),
   );
+  const period = periodCard();
+  if (period) kids.push(period);
   if (!sum.days.length) {
     kids.push(h('div', { class: 'empty' }, 'No Claude Code requests in this range. Try "All".'));
     main.replaceChildren(...kids.map((k) => (k instanceof Node ? k : document.createTextNode(String(k)))));
@@ -390,13 +558,13 @@ async function overview(token: number) {
         { key: 'sessions', label: 'Sessions', num: true, sort: (d) => d.sessions, cell: (d) => d.sessions },
         { key: 'requests', label: 'Requests', num: true, sort: (d) => d.requests, cell: (d) => d.requests },
         ...COMPONENTS.map((c) => ({ key: c.key, label: c.label, num: true, sort: (d: Summary['days'][number]) => d[c.key], cell: (d: Summary['days'][number]) => fmtTokens(d[c.key]) })),
-        { key: 'cost', label: 'Cost', num: true, sort: (d) => d.cost, cell: (d) => fmtUSD(d.cost) },
+        { key: 'cost', label: costWord(), num: true, sort: (d) => d.cost, cell: (d) => fmtUSD(d.cost) },
       ],
       { onRow: (d) => go(`#/day/${d.day}`), initial: 'day' },
     );
   const modeSeg = seg(
     [
-      { key: 'cost', label: 'Cost' },
+      { key: 'cost', label: costWord() },
       { key: 'tokens', label: 'Tokens' },
     ],
     state.dailyMode,
@@ -419,7 +587,7 @@ async function overview(token: number) {
   );
   kids.push(
     card(
-      state.dailyMode === 'cost' ? 'Cost by day' : 'Tokens by day',
+      state.dailyMode === 'cost' ? `${costWord()} by day` : 'Tokens by day',
       'Click a day to see its sessions',
       [modeSeg, tableBtn, ...exportButtons('usage-by-day', () => sum.days.map(({ costByModel, costParts, ...d }) => ({ ...d, ...Object.fromEntries(Object.entries(costParts).map(([k, v]) => [`cost_${k}`, v])) })))],
       legend(COMPONENTS.map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))),
@@ -457,7 +625,7 @@ function sessionsCard(rows: SessionRow[], title: string, day: string | undefined
         { key: 'peak', label: 'Peak context', num: true, sort: (r) => r.peakContextPct, cell: (r) => h('span', { title: `${fmtInt(r.peakContext)} tokens` }, meter(r.peakContextPct)) },
         { key: 'tokens', label: 'Tokens in / out', num: true, sort: (r) => r.input + r.cacheRead + r.cacheWrite, cell: (r) => `${fmtTokens(r.input + r.cacheRead + r.cacheWrite)} / ${fmtTokens(r.output)}` },
         { key: 'start', label: 'Started', num: true, sort: (r) => r.firstTs, cell: (r) => fmtTime(r.firstTs) },
-        { key: 'cost', label: 'Cost', num: true, sort: (r) => r.cost, cell: (r) => barCell(r.cost, maxCost, fmtUSD(r.cost)) },
+        { key: 'cost', label: costWord(), num: true, sort: (r) => r.cost, cell: (r) => barCell(r.cost, maxCost, fmtUSD(r.cost)) },
       ],
       { onRow: (r) => go(`#/session/${encodeURIComponent(r.id)}${q}`), initial: 'cost', limit: 50 },
     ),
@@ -475,7 +643,7 @@ async function dayView(token: number, day: string) {
     h(
       'div',
       { class: 'tiles' },
-      tile('Cost', fmtUSD(t.cost), fmtDay(day), true),
+      tile(acct?.mode === 'subscription' ? 'API-equivalent value' : 'Cost', fmtUSD(t.cost), fmtDay(day), true),
       tile('Sessions', fmtInt(t.sessions), `${fmtInt(t.requests)} requests`),
       tile('Input tokens', fmtTokens(inTokens), `${fmtPct(inTokens ? t.cacheRead / inTokens : 0)} from cache`),
       tile('Output tokens', fmtTokens(t.output)),
@@ -486,15 +654,64 @@ async function dayView(token: number, day: string) {
 
 /* ---------- level 3: one session ---------- */
 
+function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id: string) => void): Node {
+  const chartEl = h('div', { class: 'chart tall' });
+  let thread = '';
+  let mode = store.get('compMode', 'tokens') as 'tokens' | 'share';
+  const legendHolder = h('div');
+  const draw = () => {
+    const pts = points.filter((p) => (p.agentId ?? '') === thread);
+    const present = CATEGORIES.filter((c) => pts.some((p) => (c.kinds as readonly string[]).some((k) => (p.byKind as Record<string, number>)[k] > 0)));
+    legendHolder.replaceChildren(legend(present.map((c) => ({ label: c.label, color: categoryColor(c) }))));
+    const old = (chartEl as unknown as { _chart?: { dispose(): void } })._chart;
+    old?.dispose();
+    (chartEl as unknown as { _chart?: unknown })._chart = pts.length ? compositionChart(chartEl, pts, mode, open) : undefined;
+    if (!pts.length) chartEl.replaceChildren(h('div', { class: 'empty' }, 'No requests on this thread'));
+  };
+  const modeSeg = seg(
+    [
+      { key: 'tokens', label: 'Tokens' },
+      { key: 'share', label: '% of context' },
+    ],
+    mode,
+    (k) => {
+      mode = k;
+      store.set('compMode', k);
+      modeSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'tokens' : 'share') === k)));
+      draw();
+    },
+  );
+  const actions: Node[] = [modeSeg];
+  if (d.subagents.length)
+    actions.unshift(
+      h(
+        'select',
+        {
+          'aria-label': 'Thread',
+          onchange: (e: Event) => {
+            thread = (e.target as HTMLSelectElement).value;
+            draw();
+          },
+        },
+        h('option', { value: '' }, 'Main thread'),
+        ...d.subagents.map((a) => h('option', { value: a.agentId }, `Subagent: ${a.agentType ?? 'agent'} · ${a.description ?? a.agentId}`)),
+      ),
+    );
+  const el = card('What filled the context over time', 'Each request’s context split by kind. Click a point to open that request.', actions, legendHolder, chartEl);
+  queueMicrotask(draw);
+  return el;
+}
+
 async function sessionView(token: number, id: string, day?: string) {
-  const d = await api<SessionDetail>('session', { id });
+  const [d, comp] = await Promise.all([api<SessionDetail>('session', { id }), api<{ points: CompositionPoint[] }>('composition', { id })]);
   if (token !== renderToken) return;
   const s = d.session;
   const reqs = d.requests;
   const dayQ = day ? `&day=${day}` : '';
   setCrumbs([{ label: 'Overview', href: '#/' }, ...(day ? [{ label: fmtDay(day), href: `#/day/${day}` }] : []), { label: s.title }]);
   const open = (rid: string) => go(`#/request/${encodeURIComponent(rid)}?session=${encodeURIComponent(s.id)}${dayQ}`);
-  const peak = reqs.reduce((a, r) => (r.contextTokens / r.contextLimit > a.contextTokens / a.contextLimit ? r : a), reqs[0]);
+  // Largest context by tokens (a small subagent can have a higher % of a smaller window).
+  const peak = reqs.reduce((a, r) => (r.contextTokens > a.contextTokens ? r : a), reqs[0]);
   const u = reqs.reduce(
     (a, r) => ({ read: a.read + r.usage.cacheRead, write: a.write + r.usage.cacheWrite5m + r.usage.cacheWrite1h, input: a.input + r.usage.input, out: a.out + r.usage.output }),
     { read: 0, write: 0, input: 0, out: 0 },
@@ -511,7 +728,7 @@ async function sessionView(token: number, id: string, day?: string) {
     { key: 'ctx', label: 'In context', num: true, cell: (r) => fmtTokens(r.contextTokens) },
     { key: 'write', label: 'Cache write', num: true, cell: (r) => fmtTokens(r.usage.cacheWrite5m + r.usage.cacheWrite1h) },
     { key: 'out', label: 'Output', num: true, cell: (r) => fmtTokens(r.usage.output) },
-    { key: 'cost', label: 'Cost', num: true, cell: (r) => fmtUSD(r.cost) },
+    { key: 'cost', label: costWord(), num: true, cell: (r) => fmtUSD(r.cost) },
   ];
   const turns = d.turns.map((t, i) =>
     h(
@@ -532,17 +749,18 @@ async function sessionView(token: number, id: string, day?: string) {
     h(
       'div',
       { class: 'tiles' },
-      tile('Session cost', fmtUSD(s.cost), s.reportedCostUSD != null ? `Claude Code last logged ${fmtUSD(s.reportedCostUSD)}` : s.project, true),
+      tile(acct?.mode === 'subscription' ? 'Session API value' : 'Session cost', fmtUSD(s.cost), s.reportedCostUSD != null ? `Claude Code last logged ${fmtUSD(s.reportedCostUSD)}` : s.project, true),
       tile('Requests', fmtInt(reqs.length), `${d.turns.length} prompts · ${d.subagents.length} subagents`),
       tile('Duration', fmtDuration(s.lastTs - s.firstTs), fmtDateTime(s.firstTs)),
       tile('Peak context', peak ? fmtTokens(peak.contextTokens) : '—', peak ? `${fmtPct(peak.contextTokens / peak.contextLimit)} of ${fmtTokens(peak.contextLimit)}` : ''),
       tile('Cache read / write', `${fmtTokens(u.read)} / ${fmtTokens(u.write)}`, `${fmtTokens(u.out)} output`),
     ),
+    compositionCard(comp.points, d, open),
     h(
       'div',
       { class: 'grid2' },
       card('Context size per request', 'Tokens the model saw on each call. Click a point to break it down.', [], legend([{ label: 'Main thread', color: cssVar('--series-1') }, ...(d.subagents.length ? [{ label: 'Subagents', color: cssVar('--series-2') }] : [])]), ctxEl),
-      card('Cost per request', 'Stacked by what you paid for. Click a bar to break it down.', [], legend(COMPONENTS.map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))), costEl),
+      card(`${costWord()} per request`, 'Stacked by token type. Click a bar to break it down.', [], legend(COMPONENTS.map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))), costEl),
     ),
     card(
       'Prompts',
@@ -564,7 +782,7 @@ async function sessionView(token: number, id: string, day?: string) {
           { key: 'desc', label: 'Task', cell: (a) => a.description ?? a.agentId },
           { key: 'model', label: 'Model', cell: (a) => h('span', { class: 'muted' }, a.model ?? '') },
           { key: 'req', label: 'Requests', num: true, cell: (a) => a.requests },
-          { key: 'cost', label: 'Cost', num: true, cell: (a) => fmtUSD(a.cost) },
+          { key: 'cost', label: costWord(), num: true, cell: (a) => fmtUSD(a.cost) },
         ], {
           onRow: (a) => {
             const first = reqs.find((r) => r.agentId === a.agentId);
@@ -684,7 +902,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
       tile('Added this turn', fmtTokens(a.addedTokens), d.thread.index ? 'new since the previous request' : 'first request of this thread'),
       tile('Cache read / write', `${fmtTokens(r.usage.cacheRead)} / ${fmtTokens(r.usage.cacheWrite5m + r.usage.cacheWrite1h)}`, `${fmtTokens(r.usage.input)} uncached`),
       tile('Output', fmtTokens(r.usage.output), r.usage.thinking ? `${fmtTokens(r.usage.thinking)} thinking` : r.stopReason ? `stop: ${r.stopReason}` : ''),
-      tile('Cost', fmtUSD(r.cost), `${r.model} · ${fmtDateTime(r.ts)}`),
+      tile(costWord(), fmtUSD(r.cost), `${r.model} · ${fmtDateTime(r.ts)}`),
     ),
     h(
       'div',
@@ -757,6 +975,13 @@ async function render() {
   main.classList.add('loading');
   try {
     disposeAll();
+    try {
+      acct = await api<AccountState>('account');
+    } catch {
+      acct = undefined;
+    }
+    if (token !== renderToken) return;
+    drawBilling();
     if (route.view === 'overview') await overview(token);
     else if (route.view === 'day') await dayView(token, route.id!);
     else if (route.view === 'session') await sessionView(token, route.id!, route.params.get('day') ?? undefined);

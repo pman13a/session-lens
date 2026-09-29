@@ -1,4 +1,5 @@
-import { attribute, threadRequests } from './attribution.js';
+import { attribute, sessionComposition, threadRequests } from './attribution.js';
+import { account, billingPeriod, sanitizeSettings, saveSettings, type AccountInfo } from './account.js';
 import { blockText } from './parse.js';
 import type { Store } from './store.js';
 import type { Request, Session } from './types.js';
@@ -142,8 +143,10 @@ export class Api {
       let peak = 0;
       let peakPct = 0;
       for (const r of reqs) {
-        if (r.contextTokens > peak) peak = r.contextTokens;
-        peakPct = Math.max(peakPct, r.contextTokens / r.contextLimit);
+        if (r.contextTokens > peak) {
+          peak = r.contextTokens;
+          peakPct = r.contextTokens / r.contextLimit;
+        }
       }
       rows.push({
         id,
@@ -300,8 +303,38 @@ export class Api {
     return { text: text.length > LIMIT ? text.slice(0, LIMIT) + `\n… (${text.length - LIMIT} more characters)` : text };
   }
 
+  /** Detected login, saved overrides, and spend in the current billing period. */
+  account(detect: () => AccountInfo = account) {
+    this.store.refresh();
+    const info = detect();
+    const st = this.store.settings;
+    const mode = st.billing ?? info.detected;
+    const period = billingPeriod(new Date(), st.periodStartDay ?? 1);
+    let cost = 0;
+    for (const r of this.store.requests.values()) {
+      const d = this.day(r.ts);
+      if (d >= period.start && d <= period.end) cost += r.cost;
+    }
+    return {
+      account: info,
+      mode,
+      overridden: st.billing != null,
+      settings: { billing: st.billing ?? 'auto', planPrice: st.planPrice ?? null, monthlyLimit: st.monthlyLimit ?? null, periodStartDay: st.periodStartDay ?? 1, discount: st.discount ?? 0 },
+      period: { ...period, cost, projected: period.daysElapsed ? (cost / period.daysElapsed) * period.days : cost },
+    };
+  }
+
+  /** Save a settings patch from the UI to the shared settings file and re-price everything. */
+  updateSettings(body: unknown) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'expected a JSON object' };
+    const next = saveSettings(this.store.settingsPath, this.store.settings, sanitizeSettings(body as Record<string, unknown>));
+    this.store.setSettings(next);
+    this.day = dayFormatter(next.timeZone);
+    return this.account();
+  }
+
   /** One entry point for every shell: HTTP server, VS Code message bridge, Electron. */
-  handle(path: string, params: URLSearchParams): unknown {
+  handle(path: string, params: URLSearchParams, body?: unknown): unknown {
     const q: Query = { from: params.get('from') ?? undefined, to: params.get('to') ?? undefined, project: params.get('project') ?? undefined };
     switch (path) {
       case '/api/summary':
@@ -312,6 +345,13 @@ export class Api {
         return this.session(params.get('id') ?? '') ?? { error: 'not found' };
       case '/api/request':
         return this.request(params.get('id') ?? '') ?? { error: 'not found' };
+      case '/api/account':
+        return this.account();
+      case '/api/settings':
+        return body === undefined ? { error: 'POST a JSON object' } : this.updateSettings(body);
+      case '/api/composition':
+        this.store.refresh();
+        return { points: sessionComposition(this.store, params.get('id') ?? '') };
       case '/api/raw':
         return this.raw(params.get('request') ?? '', params.get('uuid') ?? '', Number(params.get('block') ?? 0)) ?? { error: 'not found' };
       default:

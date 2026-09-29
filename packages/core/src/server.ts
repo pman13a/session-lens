@@ -39,7 +39,34 @@ export function createServer(opts: ServerOptions): Promise<{ server: http.Server
       }
       const url = new URL(req.url ?? '/', 'http://localhost');
       if (url.pathname.startsWith('/api/')) {
-        const body = JSON.stringify(api.handle(url.pathname, url.searchParams));
+        let payload: unknown;
+        if (req.method === 'POST') {
+          // Writes must be JSON (forces a CORS preflight a foreign page can't pass) from our own origin.
+          const origin = req.headers.origin;
+          const originHost = origin ? new URL(origin).hostname.replace(/^\[|\]$/g, '') : undefined;
+          if (!(req.headers['content-type'] ?? '').startsWith('application/json') || (originHost && !['127.0.0.1', 'localhost', '::1'].includes(originHost))) {
+            res.writeHead(403).end();
+            return;
+          }
+          let raw = '';
+          for await (const chunk of req) {
+            raw += chunk;
+            if (raw.length > 65_536) {
+              res.writeHead(413).end();
+              return;
+            }
+          }
+          try {
+            payload = JSON.parse(raw || 'null');
+          } catch {
+            res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'invalid JSON' }));
+            return;
+          }
+        } else if (req.method !== 'GET') {
+          res.writeHead(405).end();
+          return;
+        }
+        const body = JSON.stringify(api.handle(url.pathname, url.searchParams, payload));
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(body);
         return;

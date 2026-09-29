@@ -36,11 +36,11 @@ function dashboardHtml(ctx: vscode.ExtensionContext, webview: vscode.Webview): s
 
 /** Answers the dashboard's API calls and save requests over postMessage. */
 function bridge(webview: vscode.Webview): vscode.Disposable {
-  return webview.onDidReceiveMessage(async (m: { type: string; id?: number; path?: string; query?: string; name?: string; content?: string }) => {
+  return webview.onDidReceiveMessage(async (m: { type: string; id?: number; path?: string; query?: string; body?: unknown; name?: string; content?: string }) => {
     if (m.type === 'api') {
       let body: unknown;
       try {
-        body = getApi().handle(`/api/${m.path}`, new URLSearchParams(m.query ?? ''));
+        body = getApi().handle(`/api/${m.path}`, new URLSearchParams(m.query ?? ''), m.body);
       } catch (e) {
         body = { error: String(e) };
       }

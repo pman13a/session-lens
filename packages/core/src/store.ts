@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { DEFAULT_SETTINGS_PATH } from './account.js';
 import { parseTranscript, type AgentMeta } from './parse.js';
 import { Pricer } from './pricing.js';
 import type { FileIndex, Rec, Request, Session, Settings } from './types.js';
@@ -13,7 +14,7 @@ export function defaultRoots(): string[] {
   return roots.filter((r) => existsSync(r));
 }
 
-export function loadSettings(path = join(homedir(), '.session-lens', 'settings.json')): Settings {
+export function loadSettings(path = DEFAULT_SETTINGS_PATH): Settings {
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as Settings;
   } catch {
@@ -75,9 +76,13 @@ export class Store {
   /** Bumped on every rebuild so derived caches know to recompute. */
   version = 0;
 
-  constructor(opts: { roots?: string[]; settings?: Settings } = {}) {
+  /** Where settings changes from the UI are saved; shared by every shell. */
+  readonly settingsPath: string;
+
+  constructor(opts: { roots?: string[]; settings?: Settings; settingsPath?: string } = {}) {
     this.roots = opts.roots ?? defaultRoots();
-    this.settings = opts.settings ?? loadSettings();
+    this.settingsPath = opts.settingsPath ?? DEFAULT_SETTINGS_PATH;
+    this.settings = opts.settings ?? loadSettings(this.settingsPath);
     this.pricer = new Pricer(this.settings);
   }
 

@@ -127,6 +127,25 @@ export interface RequestDetail {
   };
 }
 
+export type BillingMode = 'api' | 'subscription' | 'team';
+
+export interface AccountState {
+  account: { source: string; loggedIn: boolean; authMethod?: string; subscriptionType?: string | null; orgName?: string | null; email?: string | null; detected: BillingMode; label: string };
+  mode: BillingMode;
+  overridden: boolean;
+  settings: { billing: BillingMode | 'auto'; planPrice: number | null; monthlyLimit: number | null; periodStartDay: number; discount: number };
+  period: { start: string; end: string; days: number; daysElapsed: number; cost: number; projected: number };
+}
+
+export interface CompositionPoint {
+  id: string;
+  ts: number;
+  agentId?: string;
+  total: number;
+  contextLimit: number;
+  byKind: Partial<Record<ItemKind, number>>;
+}
+
 interface VsCodeApi {
   postMessage(msg: unknown): void;
 }
@@ -150,7 +169,7 @@ if (typeof window.acquireVsCodeApi === 'function') {
   });
 }
 
-export async function api<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+export async function api<T>(path: string, params: Record<string, string | undefined> = {}, post?: unknown): Promise<T> {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
   let body: unknown;
@@ -158,10 +177,13 @@ export async function api<T>(path: string, params: Record<string, string | undef
     const id = ++seq;
     body = await new Promise((resolve) => {
       pending.set(id, resolve);
-      vscode!.postMessage({ type: 'api', id, path, query: qs.toString() });
+      vscode!.postMessage({ type: 'api', id, path, query: qs.toString(), body: post });
     });
   } else {
-    const res = await fetch(`./api/${path}?${qs}`);
+    const res = await fetch(
+      `./api/${path}?${qs}`,
+      post === undefined ? undefined : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(post) },
+    );
     body = await res.json();
   }
   if (body && typeof body === 'object' && 'error' in body) throw new Error(String((body as { error: unknown }).error));

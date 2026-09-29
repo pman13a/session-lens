@@ -2,7 +2,7 @@ import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
 import { DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
-import type { ContextItem, CostParts, DayRow, ItemKind, RequestRow } from './api';
+import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, RequestRow } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
 echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer]);
@@ -357,6 +357,69 @@ export function contextTreemap(el: HTMLElement, items: ContextItem[], onItem: (i
     const id = (p.data as { itemId?: string } | undefined)?.itemId;
     const it = id ? items.find((i) => i.id === id) : undefined;
     if (it) onItem(it);
+  });
+  return chart;
+}
+
+/* ---------- 3c. context composition over time ---------- */
+
+export function compositionChart(el: HTMLElement, points: CompositionPoint[], mode: 'tokens' | 'share', onReq: (id: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  const catTotals = (p: CompositionPoint) =>
+    CATEGORIES.map((c) => (c.kinds as readonly ItemKind[]).reduce((a, k) => a + (p.byKind[k] ?? 0), 0));
+  const rows = points.map(catTotals);
+  const present = CATEGORIES.map((_, ci) => rows.some((r) => r[ci] > 0));
+  const value = (r: number[], ci: number, total: number) => (mode === 'share' ? (total ? (r[ci] / total) * 100 : 0) : r[ci]);
+  const fmt = (v: number) => (mode === 'share' ? `${v.toFixed(v < 10 ? 1 : 0)}%` : fmtTokens(v));
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        const p = points[i];
+        const r = rows[i];
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(p.ts)} · ${fmtTokens(p.total)} in context</div>` +
+          CATEGORIES.map((c, ci) => ({ c, ci }))
+            .filter(({ ci }) => present[ci])
+            .reverse()
+            .map(({ c, ci }) => row(categoryColor(c), c.label, `${fmtTokens(r[ci])} · ${p.total ? ((r[ci] / p.total) * 100).toFixed(1) : 0}%`))
+            .join('') +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">click to open this request</div>`
+        );
+      },
+    },
+    xAxis: { type: 'category', boundaryGap: false, data: points.map((p) => p.id), ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (_: string, i: number) => String(i + 1) } },
+    yAxis: {
+      type: 'value',
+      max: mode === 'share' ? 100 : undefined,
+      ...b.axisCommon,
+      axisLine: { show: false },
+      axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmt(v) },
+    },
+    series: CATEGORIES.map((c, ci) => ({ c, ci }))
+      .filter(({ ci }) => present[ci])
+      .map(({ c, ci }) => ({
+        name: c.label,
+        type: 'line',
+        stack: 'ctx',
+        symbol: 'none',
+        lineStyle: { width: 1, color: surface },
+        areaStyle: { color: categoryColor(c), opacity: 0.9 },
+        emphasis: { disabled: true },
+        data: rows.map((r, i) => value(r, ci, points[i].total)),
+      })),
+  });
+  chart.getZr().on('click', (e) => {
+    const idx = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    const i = idx?.[0];
+    if (i != null && points[i]) onReq(points[i].id);
   });
   return chart;
 }

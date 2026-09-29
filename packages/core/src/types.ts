@@ -133,7 +133,18 @@ export interface Totals {
   requests: number;
 }
 
+/** How usage turns into money: pay per token, a flat subscription, or a Team/Enterprise seat. */
+export type BillingMode = 'api' | 'subscription' | 'team';
+
 export interface Settings {
+  /** Override the detected billing mode. Unset = follow the logged-in account. */
+  billing?: BillingMode;
+  /** Monthly subscription fee in USD (Pro/Max), to compare API-equivalent value against. */
+  planPrice?: number;
+  /** Monthly spend limit in USD (Team/Enterprise allowance, or your own API budget). */
+  monthlyLimit?: number;
+  /** Day of the month the billing period starts (1–28). */
+  periodStartDay?: number;
   /** Fraction taken off every cost, e.g. 0.1 for a 10% negotiated discount. */
   discount?: number;
   /** Per-model overrides merged over pricing.json, keyed by model id prefix. */

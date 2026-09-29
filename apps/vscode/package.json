@@ -2,7 +2,7 @@
   "name": "session-lens-vscode",
   "displayName": "Session Lens",
   "description": "Claude Code usage by day \u2192 session \u2192 request \u2192 context line items",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "private": true,
   "license": "MIT",
@@ -69,7 +69,7 @@
     "package": "npm run build && npx --yes @vscode/vsce@3 package --no-dependencies -o session-lens.vsix"
   },
   "devDependencies": {
-    "@session-lens/core": "0.1.0",
+    "@session-lens/core": "0.2.0",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
     "esbuild": "^0.25.0",

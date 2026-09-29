@@ -1,0 +1,24 @@
+{
+  "name": "session-lens-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Session Lens in its own window",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "prestart": "node -e \"require('fs').existsSync('../../packages/ui/dist/index.html')||process.exit(console.error('Run npm run build in the session-lens folder first.')||1)\"",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@session-lens/core": "file:../../packages/core"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pman13a/session-lens.git",
+    "directory": "apps/desktop"
+  }
+}

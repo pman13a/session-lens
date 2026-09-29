@@ -1,0 +1,29 @@
+{
+  "name": "session-lens",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Drill-down explorer for Claude Code usage: day \u2192 session \u2192 request \u2192 context line items",
+  "workspaces": [
+    "packages/core",
+    "packages/ui",
+    "apps/server",
+    "apps/vscode"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/core && npm run build -w packages/ui && npm run build -w apps/server && npm run build -w apps/vscode",
+    "test": "npm test -w packages/core",
+    "start": "node apps/server/dist/cli.js",
+    "demo": "node scripts/demo-data.mjs demo-projects && node apps/server/dist/cli.js --projects demo-projects",
+    "package:vscode": "npm run package -w apps/vscode",
+    "desktop": "cd apps/desktop && npm install && npm start"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pman13a/session-lens.git"
+  },
+  "homepage": "https://github.com/pman13a/session-lens#readme"
+}

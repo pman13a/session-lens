@@ -1,0 +1,143 @@
+/** Token counts for one API request, exactly as the transcript reports them. */
+export interface Usage {
+  input: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheRead: number;
+  output: number;
+  thinking: number;
+  webSearches: number;
+}
+
+export type ItemKind =
+  | 'baseline' // system prompt + tool definitions (never written to the transcript)
+  | 'unattributed' // context growth the transcript can't explain: tool schemas loaded mid-session, hidden thinking
+  | 'prompt' // a human-typed message
+  | 'meta' // harness-injected user text (continue prompts, command output)
+  | 'compact_summary'
+  | 'attachment' // system reminders, environment snapshots, skill listings...
+  | 'text' // assistant text
+  | 'thinking'
+  | 'tool_use'
+  | 'tool_result'
+  | 'image';
+
+/** One piece of transcript content, measured in characters. */
+export interface ContentPiece {
+  kind: ItemKind;
+  /** Short human label: tool name, attachment type, first words of a prompt. */
+  label: string;
+  /** Secondary detail: file path, command, url. */
+  detail?: string;
+  chars: number;
+  /** Index of the block within the record, used to fetch raw content. */
+  block: number;
+  toolUseId?: string;
+  toolName?: string;
+}
+
+/** A transcript line reduced to what the index needs. Raw text is re-read on demand. */
+export interface Rec {
+  uuid: string;
+  parentUuid: string | null;
+  type: 'user' | 'assistant' | 'attachment' | 'system';
+  ts: number;
+  line: number;
+  promptId?: string;
+  requestId?: string;
+  model?: string;
+  usage?: Usage;
+  stopReason?: string;
+  isMeta?: boolean;
+  isHuman?: boolean;
+  pieces: ContentPiece[];
+}
+
+export interface FileIndex {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  sessionId: string;
+  /** Set for subagent transcripts (<session>/subagents/agent-<id>.jsonl). */
+  agentId?: string;
+  agentType?: string;
+  agentDescription?: string;
+  agentToolUseId?: string;
+  cwd?: string;
+  title?: string;
+  firstTs: number;
+  lastTs: number;
+  records: Rec[];
+  /** Claude Code's own running cost for the session, when it wrote one. */
+  reportedCostUSD?: number;
+}
+
+export interface Price {
+  input: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheRead: number;
+  context: number;
+}
+
+export interface Request {
+  id: string;
+  sessionId: string;
+  agentId?: string;
+  file: string;
+  ts: number;
+  model: string;
+  usage: Usage;
+  cost: number;
+  /** Tokens occupying the context window for this call: input + cache read + cache write. */
+  contextTokens: number;
+  contextLimit: number;
+  /** First and last transcript records of this request (one response is split across several). */
+  firstUuid: string;
+  uuids: string[];
+  promptId?: string;
+  /** Tools the response called. */
+  tools: string[];
+  stopReason?: string;
+}
+
+export interface SubagentInfo {
+  agentId: string;
+  agentType?: string;
+  description?: string;
+  toolUseId?: string;
+  requestIds: string[];
+}
+
+export interface Session {
+  id: string;
+  project: string;
+  cwd?: string;
+  title: string;
+  firstTs: number;
+  lastTs: number;
+  mainFile?: string;
+  files: string[];
+  requestIds: string[];
+  subagents: SubagentInfo[];
+  reportedCostUSD?: number;
+}
+
+export interface Totals {
+  input: number;
+  cacheWrite: number;
+  cacheRead: number;
+  output: number;
+  cost: number;
+  requests: number;
+}
+
+export interface Settings {
+  /** Fraction taken off every cost, e.g. 0.1 for a 10% negotiated discount. */
+  discount?: number;
+  /** Per-model overrides merged over pricing.json, keyed by model id prefix. */
+  prices?: Record<string, Partial<Price>>;
+  /** IANA time zone used to bucket requests into days. Defaults to the system zone. */
+  timeZone?: string;
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@session-lens/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "pricing.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp ../../config/pricing.json dist/pricing.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pman13a/session-lens.git",
+    "directory": "packages/core"
+  }
+}

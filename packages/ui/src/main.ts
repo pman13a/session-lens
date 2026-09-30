@@ -861,7 +861,8 @@ const timelineZoom = new Map<string, { start: number; end: number }>();
  * cost (bottom). Thread, scale and zoom apply to both, and survive live redraws.
  */
 function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: SessionDetail, open: (id: string) => void): Node {
-  const chartEl = h('div', { class: 'chart', style: { height: '820px' } });
+  const chartEl = h('div', { class: 'chart', style: { height: '1040px' } });
+  const packages = promptPackages(d).filter((p) => p.first);
   let thread = compThread.get(d.session.id) ?? '';
   let xMode = store.get('xMode', store.get('accAxis', 'request')) as 'request' | 'time';
   let mode = store.get('compMode', 'tokens') as 'tokens' | 'share';
@@ -889,6 +890,17 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     );
     const threadLaunched = thread ? undefined : launched;
     const launchedKey = threadLaunched?.size ? [h('span', { title: 'Each subagent’s whole cost, on the request that launched it; the pin on the context panel marks the launch' }, h('i', { style: { background: roleColor('subagent'), opacity: '0.55' } }), 'Subagents launched')] : [];
+    const promptKey = thread
+      ? []
+      : [
+          h(
+            'div',
+            { class: 'legend' },
+            h('span', { class: 'muted' }, 'Per prompt:'),
+            h('span', { title: 'The call your message started' }, h('i', { style: { background: roleColor('prompt') } }), 'Your prompt call'),
+            h('span', { title: 'Everything Claude did after it for that prompt: iterations, the final answer, subagents' }, h('i', { style: { background: roleColor('iteration') } }), 'Claude’s work for it'),
+          ),
+        ];
     legendHolder.replaceChildren(
       colorBy === 'who'
         ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Context, put there by:'), ...ORIGINS.filter((o) => pts.some((p) => (p.byOrigin?.[o.key] ?? 0) > 0)).map((o) => h('span', { title: o.hint }, h('i', { style: { background: originColor(o.key) } }), o.label)))
@@ -896,6 +908,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
       colorBy === 'who'
         ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, `${costWord()}, by why the call happened:`), ...ROLES.filter((ro) => threadReqs.some((r) => r.role === ro.key)).map((ro) => h('span', { title: ro.hint }, h('i', { style: { background: roleColor(ro.key) } }), ro.label)), ...launchedKey)
         : h('div', { class: 'legend' }, h('span', { class: 'muted' }, `${costWord()}:`), ...parts.map((c) => h('span', {}, h('i', { style: { background: cssVar(`--series-${c.slot}`) } }), c.label)), ...launchedKey),
+      ...promptKey,
     );
     const old = (chartEl as unknown as { _chart?: { dispose(): void } })._chart;
     old?.dispose();
@@ -903,11 +916,11 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
       chartEl.replaceChildren(h('div', { class: 'empty' }, 'No requests on this thread'));
       return;
     }
-    const res = timelineChart(chartEl, pts, threadReqs, { mode, costScale, colorBy, xMode, launched: threadLaunched, zoom: timelineZoom.get(zoomKey()), onZoom: (z) => timelineZoom.set(zoomKey(), z) }, open);
+    const res = timelineChart(chartEl, pts, threadReqs, { mode, costScale, colorBy, xMode, launched: threadLaunched, prompts: thread ? undefined : packages, zoom: timelineZoom.get(zoomKey()), onZoom: (z) => timelineZoom.set(zoomKey(), z) }, open);
     (chartEl as unknown as { _chart?: unknown })._chart = res.chart;
     note.textContent = res.cap && res.clipped.length
       ? `Cost axis capped at ${fmtUSD(res.cap)} so everyday requests are readable. Above it: ${res.clipped.slice(0, 6).map((c) => `#${c.n} ${fmtUSD(c.cost)}`).join(', ')}${res.clipped.length > 6 ? ` and ${res.clipped.length - 6} more` : ''}. Hover shows the real value.`
-      : 'Drag the slider or ctrl-scroll to zoom all three charts together.';
+      : 'Drag the slider or ctrl-scroll to zoom all four charts together.';
   };
   const modeSeg = seg(
     [
@@ -937,7 +950,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   );
   scaleSeg.title = 'Capped: the axis stops at 1.5× the 95th percentile so everyday requests are readable; spikes are clipped and listed below';
   // Sits on the Cost per request chart itself, level with its title.
-  const scaleHolder = h('div', { class: 'panel-control', style: { top: 'calc(45% - 2px)' } }, scaleSeg);
+  const scaleHolder = h('div', { class: 'panel-control', style: { top: 'calc(36% - 2px)' } }, scaleSeg);
   const chartWrap = h('div', { style: { position: 'relative' } }, chartEl, scaleHolder);
   const colorSeg = seg(
     [
@@ -986,7 +999,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     );
   const el = card(
     'Session timeline',
-    'Three charts on one axis: zoom, hover and By request / By time move them together. Click any chart to open that request.',
+    'Four charts on one axis: zoom, hover and By request / By time move them together. Click any chart to open that request.',
     actions,
     legendHolder,
     chartWrap,
@@ -994,6 +1007,21 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   );
   queueMicrotask(draw);
   return el;
+}
+
+/**
+ * Split each prompt's cost: the call your message started, and everything Claude did after it for that
+ * prompt (iterations, the final answer, subagents). Together they are the prompt's whole package.
+ */
+function promptPackages(d: SessionDetail) {
+  const byId = new Map(d.requests.map((r) => [r.id, r]));
+  const mainOrder = new Map(d.requests.filter((r) => !r.agentId).map((r, i) => [r.id, i]));
+  return d.turns.map((t, i) => {
+    const rs = t.requestIds.map((id) => byId.get(id)).filter((r): r is RequestRow => !!r);
+    const prompt = rs.filter((r) => r.role === 'prompt').reduce((a, r) => a + r.cost + (r.side ?? 0), 0);
+    const main = rs.filter((r) => !r.agentId).sort((a, b) => mainOrder.get(a.id)! - mainOrder.get(b.id)!);
+    return { n: i + 1, promptId: t.promptId, text: t.text, ids: main.map((r) => r.id), first: main[0]?.id ?? '', last: main[main.length - 1]?.id ?? '', prompt, work: Math.max(0, t.cost - prompt), hasPrompt: rs.some((r) => r.role === 'prompt') };
+  });
 }
 
 /** Who drove this session's cost: your prompts, Claude's own iterations, subagents, automatic calls. */
@@ -1084,8 +1112,11 @@ async function sessionView(token: number, id: string, day?: string) {
     };
     return Object.assign(color, { ratio, strength });
   };
-  // Prompt level: each prompt against every other prompt in the session.
-  const heat = heatScale(d.turns.map((t) => t.cost));
+  // Prompt level, two heat maps: the call your message started, and Claude's work for it, each against
+  // the same figure for every other prompt in the session.
+  const pkgs = promptPackages(d);
+  const heat = heatScale(pkgs.filter((p) => p.hasPrompt).map((p) => p.prompt));
+  const workHeat = heatScale(pkgs.map((p) => p.work));
   const turnEl = (t: SessionDetail['turns'][number], i: number) =>
     h(
       'details',
@@ -1117,7 +1148,11 @@ async function sessionView(token: number, id: string, day?: string) {
           );
         })(),
         h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
-        h('b', { class: 'heat', style: { background: heat(t.cost) }, title: `${fmtUSD(t.cost)}: green is this session’s cheapest prompt, red its most expensive` }, fmtUSD(t.cost)),
+        pkgs[i].hasPrompt
+          ? h('b', { class: 'heat', style: { background: heat(pkgs[i].prompt) }, title: `Your prompt call: ${fmtUSD(pkgs[i].prompt)}. Colored against the other prompt calls in this session.` }, fmtUSD(pkgs[i].prompt))
+          : h('span', { class: 'heat-empty', title: 'No call from your message in this group' }, '—'),
+        h('b', { class: 'heat', style: { background: workHeat(pkgs[i].work) }, title: `Claude’s work for this prompt: ${fmtUSD(pkgs[i].work)} (iterations, final answer, subagents). Colored against the other prompts.` }, fmtUSD(pkgs[i].work)),
+        h('b', { class: 'total', title: 'The whole package: your call + Claude’s work' }, fmtUSD(t.cost)),
       ),
       (() => {
         // Request level: scaled within this prompt only, so its own priciest call is red.
@@ -1160,13 +1195,20 @@ async function sessionView(token: number, id: string, day?: string) {
       drawTurns();
     },
   );
+  const colHead = h(
+    'div',
+    { class: 'turn-head' },
+    h('span', { title: 'The call your message started' }, 'Your prompt'),
+    h('span', { title: 'Everything Claude did after it for that prompt: iterations, the final answer, subagents' }, 'Claude’s work'),
+    h('span', { title: 'Your prompt + Claude’s work' }, 'Total'),
+  );
   const heatKey = h(
     'div',
     { class: 'legend', style: { justifyContent: 'flex-end' } },
     h(
       'span',
       { class: 'muted', title: 'Prompts are colored against each other, and the requests inside a prompt against each other. The wider the spread (most ÷ least expensive), the stronger the colors: 10× or more is full red–green; costs close together stay neutral.' },
-      `Cost, relative to its level (prompts here span ${heat.ratio >= 100 ? Math.round(heat.ratio) : heat.ratio.toFixed(1)}×):`,
+      'Cost, relative to its column and level:',
     ),
     h('span', {}, 'lowest'),
     h('span', { style: { width: '90px', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg, hsl(120 70% 38%), hsl(60 70% 38%), hsl(0 70% 38%))' } }),
@@ -1203,6 +1245,7 @@ async function sessionView(token: number, id: string, day?: string) {
         ),
       ],
       heatKey,
+      colHead,
       turnsHolder,
     ),
   ];

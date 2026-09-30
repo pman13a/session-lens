@@ -183,6 +183,10 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 /* Low-profile request count: small, outlined, muted, fixed width so the prompt text lines up. */
 .turn summary .req-count { flex: none; min-width: 34px; text-align: center; font-size: 11px; line-height: 16px; padding: 0 5px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .turn summary .req-range { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.turn summary .heat-empty { flex: none; min-width: 72px; text-align: right; color: var(--text-muted); }
+.turn summary .total { flex: none; min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.turn-head { display: flex; justify-content: flex-end; gap: 10px; padding: 6px 0 2px; font-size: 11px; color: var(--text-muted); }
+.turn-head span { min-width: 72px; text-align: right; }
 .turn summary .heat { flex: none; min-width: 72px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-variant-numeric: tabular-nums; }
 
 .raw { position: fixed; right: 0; top: 0; bottom: 0; width: min(640px, 100vw); background: var(--surface-1); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12); display: flex; flex-direction: column; z-index: 20; }

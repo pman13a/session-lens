@@ -1,11 +1,11 @@
-import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
+import { BarChart, CustomChart, LineChart, TreemapChart } from 'echarts/charts';
 import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, MarkPointComponent, TitleComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, ItemOrigin, RequestRole, RequestRow, UsageView } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
-echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, MarkPointComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
+echarts.use([BarChart, CustomChart, LineChart, TreemapChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, MarkPointComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
 
 /* ---------- theme from CSS custom properties ---------- */
 
@@ -428,7 +428,9 @@ export function compositionChart(el: HTMLElement, points: CompositionPoint[], mo
       ...b.tooltip,
       trigger: 'axis',
       axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
-      formatter: (ps: { dataIndex: number }[]) => {
+      formatter: (all: { dataIndex: number; seriesType?: string }[]) => {
+        const ps = all.filter((x) => x.seriesType !== 'custom');
+        if (!ps.length) return '';
         const i = ps[0].dataIndex;
         const p = points[i];
         const r = rows[i];
@@ -679,8 +681,13 @@ export interface TimelineOptions {
   colorBy: 'kind' | 'who';
   /** Cost of the subagents each request launched, drawn on top of that request's bar. */
   launched?: Map<string, { cost: number; names: string[] }>;
-  /** Space requests evenly ('request') or place them at the time they ran ('time'). All three panels follow. */
+  /** Space requests evenly ('request') or place them at the time they ran ('time'). All panels follow. */
   xMode: 'request' | 'time';
+  /**
+   * One entry per prompt on this thread: the requests it spans, the cost of the call your message
+   * started, and the cost of everything Claude did after it (iterations, answer, subagents).
+   */
+  prompts?: { n: number; first: string; last: string; ids: string[]; prompt: number; work: number; text: string }[];
 }
 
 /**
@@ -783,8 +790,8 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
       name: cs.name,
       type: 'line',
       stack: 'cum',
-      xAxisIndex: 2,
-      yAxisIndex: 2,
+      xAxisIndex: 3,
+      yAxisIndex: 3,
       symbol: 'none',
       step: byTime ? 'end' : undefined,
       lineStyle: { width: 1, color: surface },
@@ -793,10 +800,39 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
       data: cs.values.map((v, i) => at(i, (run += v))),
     };
   });
+  // Cost per prompt: one block per prompt, as wide as its requests and as tall as the whole package.
+  const promptOf = new Map<string, NonNullable<TimelineOptions['prompts']>[number]>();
+  const blocks = (opts.prompts ?? []).filter((pr) => pos.has(pr.first) && pos.has(pr.last));
+  for (const pr of blocks) for (const id of pr.ids) promptOf.set(id, pr);
+  const xOf = (id: string) => (byTime ? points[pos.get(id)!].ts : pos.get(id)!);
+  const blockSeries = (name: string, color: string, lo: (pr: (typeof blocks)[number]) => number, hi: (pr: (typeof blocks)[number]) => number) => ({
+    name,
+    type: 'custom',
+    xAxisIndex: 2,
+    yAxisIndex: 2,
+    encode: { x: [0, 1], y: [2, 3] },
+    tooltip: { show: false },
+    data: blocks.map((pr) => [xOf(pr.first), xOf(pr.last), lo(pr), hi(pr), pr.n]),
+    renderItem: (_: unknown, api: { value: (i: number) => number; coord: (v: number[]) => number[]; size: (v: number[]) => number[] }) => {
+      // Category axis: extend half a band each side so a block covers its first and last bar fully.
+      const half = byTime ? 1.5 : api.size([1, 0])[0] / 2;
+      const a = api.coord([api.value(0), api.value(2)]);
+      const z = api.coord([api.value(1), api.value(3)]);
+      const x = a[0] - half;
+      const w = Math.max(3, z[0] + half - x);
+      return { type: 'rect', shape: { x, y: z[1], width: w, height: a[1] - z[1] }, style: { fill: color, stroke: surface, lineWidth: 1 } };
+    },
+  });
+  const promptSeries = blocks.length
+    ? [
+        blockSeries('Your prompt call', roleColor('prompt'), () => 0, (pr) => pr.prompt),
+        blockSeries('Claude’s work for it', roleColor('iteration'), (pr) => pr.prompt, (pr) => pr.prompt + pr.work),
+      ]
+    : [];
   const cumTotals: number[] = [];
   totals.reduce((a, t, i) => (cumTotals[i] = a + t), 0);
 
-  const last = 2;
+  const last = 3;
   // Sessions often span days: add the date once the thread runs longer than a day.
   const multiDay = points.length > 1 && points[points.length - 1].ts - points[0].ts > 20 * 3600_000;
   const timeLabel = (v: number) =>
@@ -842,25 +878,33 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
     axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: cssVar('--axis') } },
     title: [
       panelTitle('What filled the context', opts.mode === 'share' ? 'Share of the context on each request' : 'Tokens in the context on each request', 0),
-      panelTitle('Cost per request', cap ? `Axis capped at ${fmtUSD(cap)}; hover shows the real value` : 'What each request cost', '45%'),
-      panelTitle('Cost accumulated over the session', `${fmtUSD(cumTotals[cumTotals.length - 1] ?? 0)} by the last request`, '71%'),
+      panelTitle('Cost per request', cap ? `Axis capped at ${fmtUSD(cap)}; hover shows the real value` : 'What each request cost', '36%'),
+      panelTitle(
+        'Cost per prompt',
+        blocks.length ? 'Each block is one prompt: as wide as its requests, as tall as the whole package (your call + Claude’s work)' : 'Prompts are shown on the main thread',
+        '56%',
+      ),
+      panelTitle('Cost accumulated over the session', `${fmtUSD(cumTotals[cumTotals.length - 1] ?? 0)} by the last request`, '76%'),
     ],
     grid: [
-      { left: LEFT, right: RIGHT, top: 48, height: '34%' },
-      { left: LEFT, right: RIGHT, top: '50.5%', height: '16%' },
-      { left: LEFT, right: RIGHT, top: '76.5%', bottom: 50 },
+      { left: LEFT, right: RIGHT, top: 48, height: '29%' },
+      { left: LEFT, right: RIGHT, top: '40.5%', height: '12.5%' },
+      { left: LEFT, right: RIGHT, top: '60.5%', height: '12.5%' },
+      { left: LEFT, right: RIGHT, top: '80.5%', bottom: 50 },
     ],
-    xAxis: [axisX(0), axisX(1), axisX(2)],
+    xAxis: [axisX(0), axisX(1), axisX(2), axisX(3)],
     yAxis: [
       { type: 'value', gridIndex: 0, max: opts.mode === 'share' ? 100 : (v: { max: number }) => niceCeil(v.max * 1.04), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: fmtCtx } },
       { type: 'value', gridIndex: 1, max: cap, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
       { type: 'value', gridIndex: 2, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+      { type: 'value', gridIndex: 3, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1, 2], start: opts.zoom?.start ?? 0, end: opts.zoom?.end ?? 100, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false },
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], filterMode: 'weakFilter', start: opts.zoom?.start ?? 0, end: opts.zoom?.end ?? 100, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false },
       {
         type: 'slider',
-        xAxisIndex: [0, 1, 2],
+        xAxisIndex: [0, 1, 2, 3],
+        filterMode: 'weakFilter',
         bottom: 6,
         height: 18,
         start: opts.zoom?.start ?? 0,
@@ -905,12 +949,21 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
           `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Cost: <b style="color:${cssVar('--text-primary')}">${fmtUSD(totals[i])}</b>${cap && totals[i] > cap ? ' (clipped on the chart)' : ''}</div>` +
           costRows +
           launchedRow +
+          (() => {
+            const pr = promptOf.get(ids[i]);
+            if (!pr) return '';
+            return (
+              `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Prompt ${pr.n} package: <b style="color:${cssVar('--text-primary')}">${fmtUSD(pr.prompt + pr.work)}</b></div>` +
+              row(roleColor('prompt'), 'Your prompt call', fmtUSD(pr.prompt)) +
+              row(roleColor('iteration'), 'Claude’s work for it', fmtUSD(pr.work))
+            );
+          })() +
           `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Accumulated so far: <b style="color:${cssVar('--text-primary')}">${fmtUSD(cumTotals[i])}</b></div>` +
           `<div style="color:${cssVar('--text-muted')};margin-top:4px">${esc(r?.tools.join(', ') || 'no tool calls')} · click to open</div>`
         );
       },
     },
-    series: [...ctxSeries, ...costSeries.map(({ values: _v, ...rest }) => rest), ...cumSeries],
+    series: [...ctxSeries, ...costSeries.map(({ values: _v, ...rest }) => rest), ...promptSeries, ...cumSeries],
   });
   chart.on('datazoom', () => {
     const dz = (chart.getOption() as { dataZoom?: { start: number; end: number }[] }).dataZoom?.[0];
@@ -919,7 +972,7 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
   chart.getZr().on('click', (e) => {
     // Only clicks inside the plot areas open a request (not the zoom slider).
     const px = [e.offsetX, e.offsetY];
-    const g = [0, 1, 2].find((k) => chart.containPixel({ gridIndex: k }, px));
+    const g = [0, 1, 2, 3].find((k) => chart.containPixel({ gridIndex: k }, px));
     if (g == null) return;
     const pt = chart.convertFromPixel({ gridIndex: g }, px) as number[] | undefined;
     if (!pt) return;

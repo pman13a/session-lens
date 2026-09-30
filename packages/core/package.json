@@ -10,7 +10,7 @@
     "pricing.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp ../../config/pricing.json dist/pricing.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('../../config/pricing.json','dist/pricing.json')\"",
     "test": "vitest run"
   },
   "devDependencies": {

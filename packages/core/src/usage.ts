@@ -151,7 +151,10 @@ export function parseDailyPaste(text: string, year: number): Record<string, numb
     }
     if (!hit || !m || !d || m > 12 || d > 31) continue;
     rest = line.slice(hit[0].length);
-    const num = /\$?\s*(\d[\d,]*(?:\.\d+)?)/.exec(rest);
+    // The last number on the line is the dashboard's: a row copied from a comparison sheet
+    // ("9/1/2026  47.48  58.69") carries other columns first.
+    const nums = [...rest.matchAll(/\$?\s*(\d[\d,]*(?:\.\d+)?)/g)];
+    const num = nums[nums.length - 1];
     if (!num) continue;
     const v = Number(num[1].replace(/,/g, ''));
     if (Number.isFinite(v)) out[`${y}-${pad(m)}-${pad(d)}`] = Math.round(v * 100) / 100;

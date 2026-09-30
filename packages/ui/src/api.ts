@@ -116,7 +116,7 @@ export interface SessionDetail {
     reportedCostUSD?: number;
     cost: number;
     sideCost: number;
-    checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number };
+    checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number; runs: number; checkedRuns: number };
     live: boolean;
     unpriced: number;
     byRole: RoleSplit;

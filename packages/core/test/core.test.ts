@@ -411,6 +411,8 @@ describe('dashboard view (matches Claude’s usage page)', () => {
       '2026-09-07': 22.4,
       '2026-09-17': 1054,
     });
+    // A row copied from a comparison sheet (day, Session Lens, dashboard): the dashboard is the last number.
+    expect(parseDailyPaste('day\tSession Lens\tDashboard\n9/1/2026\t47.4755\t58.69\n9/2/2026\t0\t0', 2026)).toEqual({ '2026-09-01': 58.69, '2026-09-02': 0 });
   });
 
   it('stores the dashboard’s own figures next to ours', () => {
@@ -520,6 +522,25 @@ describe('fixes from the claude-usage review', () => {
     expect(store.requests.get('c1')!.side).toBeCloseTo(0.03);
     expect(store.requests.get('c2')!.side).toBe(0);
     expect(new Api(store).summary({}).totals.cost).toBeCloseTo(0.43);
+  });
+
+  it('reconciles each run of the app separately (the total restarts when the app restarts)', () => {
+    const t = new Transcript('s1');
+    t.prompt('go');
+    t.response('r1', usage(0, 1_000_000, 0, 0), [{ type: 'text', text: 'a' }]); // $0.20
+    t.lines.push({ type: 'cost-state', sessionId: 's1', totalCostUSD: 0.22 }); // run 1: $0.02 of side calls
+    // The app restarts: its total starts again from zero.
+    t.response('r2', usage(0, 2_000_000, 0, 0), [{ type: 'text', text: 'b' }]); // $0.40
+    t.lines.push({ type: 'cost-state', sessionId: 's1', totalCostUSD: 0.2 }); // mid-run checkpoint
+    t.response('r3', usage(0, 1_000_000, 0, 0), [{ type: 'text', text: 'c' }]); // $0.20
+    t.lines.push({ type: 'cost-state', sessionId: 's1', totalCostUSD: 0.65 }); // run 2: $0.60 recorded, $0.05 side
+    const store = makeStore({ 's1.jsonl': t.text() });
+    const s = store.sessions.get('s1')!;
+    expect(s.checkpoint).toMatchObject({ runs: 2, checkedRuns: 2 });
+    expect(s.checkpoint!.claudeCodeUSD).toBeCloseTo(0.87);
+    expect(s.sideCost).toBeCloseTo(0.07);
+    expect(store.requests.get('r1')!.side).toBeCloseTo(0.02);
+    expect(store.requests.get('r2')!.side + store.requests.get('r3')!.side).toBeCloseTo(0.05);
   });
 
   it('never guesses a price for an unknown model', () => {

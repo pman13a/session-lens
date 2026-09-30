@@ -91,6 +91,8 @@ export interface FileIndex {
   reportedCostUSD?: number;
   /** The last such record, with how many records preceded it: used to reconcile. */
   costCheckpoint?: { totalUSD: number; recordCount: number; ts: number };
+  /** Every cost-state checkpoint in file order. Claude Code's total restarts with each run of the app. */
+  costCheckpoints?: { totalUSD: number; recordCount: number; ts: number }[];
 }
 
 export interface Price {
@@ -179,7 +181,7 @@ export interface Session {
   reportedCostUSD?: number;
   /** Side calls: Claude Code's own tally minus what the transcript records add up to, at the last checkpoint. */
   sideCost: number;
-  checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number };
+  checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number; runs: number; checkedRuns: number };
 }
 
 export interface Totals {

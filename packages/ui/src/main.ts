@@ -241,12 +241,93 @@ function shell() {
         liveBadge,
         refreshBtn,
         themeBtn,
+        h('button', { class: 'btn', title: 'What Session Lens is for, where its numbers come from, and its limits', onclick: () => openIntro() }, 'About'),
       ),
       crumbs,
       main,
     ),
   );
 }
+
+/* ---------- launch screen: what this is for, and its limits ---------- */
+
+let introEl: HTMLElement | undefined;
+function closeIntro() {
+  introEl?.remove();
+  introEl = undefined;
+  store.set('introSeen', '1');
+}
+
+/** Shown on first launch, and from About. Honest about what the numbers are and are not. */
+async function openIntro() {
+  closeIntro();
+  const [cfg, pr] = await Promise.all([api<ConfigInfo>('config').catch(() => undefined), api<PricingInfo>('pricing').catch(() => undefined)]);
+  const sec = (title: string, ...body: Child[]) => h('section', {}, h('h3', {}, title), ...body);
+  const ul = (...items: Child[]) => h('ul', {}, ...items.map((x) => h('li', {}, x)));
+  const code = (t: string) => h('code', {}, t);
+  const priceDate = pr?.appliedFromAnthropic ? `updated from Anthropic’s page on ${fmtDay(pr.appliedFromAnthropic.slice(0, 10))}` : pr?.checkedAt ? `checked against Anthropic’s page on ${fmtDay(pr.checkedAt)}` : '';
+  introEl = h(
+    'div',
+    { class: 'intro-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'About Session Lens', onclick: (e: Event) => e.target === introEl && closeIntro() },
+    h(
+      'div',
+      { class: 'intro' },
+      h('header', {}, h('h2', {}, lensIcon(), 'Session Lens'), h('button', { class: 'btn', onclick: closeIntro, 'aria-label': 'Close' }, '✕')),
+      h('p', { class: 'lead' }, 'A lens on how your Claude Code usage is spent: which sessions, which prompts, which calls and which tool results filled the context and drove the cost.'),
+      sec(
+        'What it is best at',
+        ul(
+          h('span', {}, h('b', {}, 'Relative usage. '), 'Which sessions, days and projects cost the most, and how they compare.'),
+          h('span', {}, h('b', {}, 'Drilling down. '), 'Session → prompt → request → the line items in the context, down to the tool call and tool result that added them.'),
+          h('span', {}, h('b', {}, 'Context breakdown. '), 'What filled the context window on every request, and when it grew.'),
+          h('span', {}, h('b', {}, 'Who made the calls. '), 'Your prompt, Claude iterating on tool results, subagents, and what each cost.'),
+        ),
+        h('p', { class: 'muted' }, 'Treat dollar figures as close estimates at list price, best for comparing one thing with another. For the exact amount you are billed, Claude’s own usage page is the source of truth.'),
+      ),
+      sec(
+        'Where the numbers come from',
+        ul(
+          h('span', {}, 'Claude Code writes a transcript of every session on this computer. Session Lens reads them, in ', cfg ? code(cfg.roots.join(', ') || '~/.claude/projects') : code('~/.claude/projects'), ', and follows them live as you work.'),
+          'Each API response in a transcript carries its measured token counts: input, cache writes, cache reads, output. Cost is those tokens × each model’s price.',
+          'How a request’s context splits into line items is estimated from text length, and always adds up to the measured total.',
+          'Nothing leaves this computer. The one exception is the “Check Anthropic’s prices” button in Settings, which reads Anthropic’s public pricing page when you click it.',
+        ),
+      ),
+      sec(
+        'Why it can differ from Claude’s usage page',
+        h('p', {}, 'It only sees what reached this computer’s transcripts. Expect it to read somewhat lower than the dashboard.'),
+        ul(
+          h('span', {}, h('b', {}, 'Usage elsewhere: '), 'Claude Code on the web or in the cloud, sessions started from your phone, other computers, and Chat, Cowork or Claude in Chrome (they leave no local transcript).'),
+          h('span', {}, h('b', {}, 'Calls with no record: '), 'a request billed after the connection dropped, and some small calls Claude Code makes for itself. Where Claude Code writes its own running total, Session Lens compares and adds the difference.'),
+          h('span', {}, h('b', {}, 'Deleted or expired transcripts: '), `sessions you deleted, and anything older than Claude Code keeps (${cfg ? `${cfg.retentionDays} days` : '30 days by default'}; set cleanupPeriodDays to keep more).`),
+          h('span', {}, h('b', {}, 'Your organisation’s rates: '), 'negotiated discounts or prices. Set them in Settings.'),
+          h('span', {}, h('b', {}, 'Late adjustments: '), 'Anthropic can revise a day’s figures for up to 30 days.'),
+        ),
+        h('p', { class: 'muted' }, 'To compare with the dashboard day by day, open Usage limits and enter its figures.'),
+      ),
+      sec(
+        'Model prices: keep them current',
+        ul(
+          h('span', {}, 'Prices ship with Session Lens', priceDate ? `, ${priceDate}` : '', '. Anthropic adds models and changes prices often, and the bundled table does not update itself.'),
+          h('span', {}, h('b', {}, 'When a model is new or a price changes, figures are out of date until you update them. '), 'Open Settings → Model prices → ', h('b', {}, 'Check Anthropic’s prices'), ' to compare and apply in one click, or edit any price by hand.'),
+          'A model with no price shows “—” instead of a guess, and Settings lists it so you can add one.',
+          h('span', {}, 'Your prices, discounts and plan are stored in ', cfg ? code(cfg.settingsPath) : code('~/.session-lens/settings.json'), ', shared by the browser, VS Code and desktop versions.'),
+        ),
+      ),
+      h(
+        'footer',
+        {},
+        h('button', { class: 'btn', onclick: () => (closeIntro(), go('#/settings')) }, 'Open Settings'),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'muted' }, 'Reopen this any time from About.'),
+        h('button', { class: 'btn primary', onclick: closeIntro }, 'Got it'),
+      ),
+    ),
+  );
+  document.body.append(introEl);
+  (introEl.querySelector('.primary') as HTMLElement | null)?.focus();
+}
+document.addEventListener('keydown', (e) => e.key === 'Escape' && introEl && closeIntro());
 
 function lensIcon() {
   const ns = 'http://www.w3.org/2000/svg';
@@ -1257,11 +1338,13 @@ async function sessionView(token: number, id: string, day?: string) {
       tile(
         acct?.mode === 'subscription' ? 'Session API value' : 'Session cost',
         fmtUSD(s.cost),
-        s.sideCost > 0
-          ? `incl. ${fmtUSD(s.sideCost)} of side calls, reconciled to Claude Code’s own ${fmtUSD(s.checkpoint!.claudeCodeUSD)}`
-          : s.reportedCostUSD != null
-            ? `Claude Code last logged ${fmtUSD(s.reportedCostUSD)}`
-            : s.project,
+        (() => {
+          const cp = s.checkpoint;
+          const runs = cp ? `${cp.checkedRuns} of ${cp.runs} run${cp.runs === 1 ? '' : 's'} checked against Claude Code’s own total` : '';
+          if (cp && s.sideCost > 0) return `incl. ${fmtUSD(s.sideCost)} of side calls · ${runs}`;
+          if (cp) return `Matches Claude Code’s own total · ${runs}`;
+          return s.project;
+        })(),
         true,
       ),
       tile('Requests', fmtInt(reqs.length), `${d.turns.length} prompts · ${d.subagents.length} subagents`),
@@ -1858,6 +1941,18 @@ function reconcileCard(v: UsageView): Node {
     });
     ratios.sort((a, b) => a - b);
     const med = ratios.length ? ratios[ratios.length >> 1] : undefined;
+    // Where the gap sits: the fewest days that make up at least half of it. A gap that follows usage
+    // spreads over every busy day; one concentrated on a few days means something happened on those days.
+    const shortfall = rows.map((r) => Math.max(0, r.dash - r.mine));
+    const gapTotal = shortfall.reduce((a, x) => a + x, 0);
+    const ranked = rows.map((r, i) => ({ d: r.d, x: shortfall[i] })).sort((a, b) => b.x - a.x);
+    const flagged = new Set<string>();
+    let acc = 0;
+    for (const r of ranked) {
+      if (acc >= gapTotal / 2 || r.x < 0.5) break;
+      flagged.add(r.d);
+      acc += r.x;
+    }
     const spread = ratios.length > 2 ? ratios[Math.floor(ratios.length * 0.8)] - ratios[Math.floor(ratios.length * 0.2)] : undefined;
     const verdict =
       med == null
@@ -1879,12 +1974,32 @@ function reconcileCard(v: UsageView): Node {
         verdict,
         over > 0.01 ? ' A local reading above the dashboard is worth a look: it can mean double counting.' : '',
       ),
+      flagged.size && gapTotal > 1
+        ? h(
+            'div',
+            { class: 'note' },
+            h('b', {}, `${flagged.size} day${flagged.size === 1 ? '' : 's'} hold${flagged.size === 1 ? 's' : ''} ${fmtPct(acc / gapTotal)} of the gap: `),
+            [...flagged].sort().map((d) => utcLabel(d, true)).join(', '),
+            '. Spend the dashboard counts on those days has no transcript on this computer: a session run elsewhere (web, phone, another machine), one that was deleted, or a request billed after the connection dropped. Click a day to see its sessions.',
+          )
+        : null,
       table(rows, [
         { key: 'd', label: 'Day (UTC)', sort: (r) => r.d, cell: (r) => utcLabel(r.d, true) },
         { key: 'dash', label: 'Dashboard', num: true, sort: (r) => r.dash, cell: (r) => fmtUSD(r.dash) },
         { key: 'mine', label: 'Session Lens', num: true, sort: (r) => r.mine, cell: (r) => fmtUSD(r.mine) },
         { key: 'diff', label: 'Difference', num: true, sort: (r) => r.diff, cell: (r) => signedUSD(r.diff) },
         { key: 'ratio', label: 'Ratio', num: true, sort: (r) => (r.dash ? r.mine / r.dash : 0), cell: (r) => (r.dash && r.mine ? `${(r.mine / r.dash).toFixed(2)}×` : '—') },
+        {
+          key: 'share',
+          label: 'Share of gap',
+          num: true,
+          sort: (r) => Math.max(0, r.dash - r.mine),
+          cell: (r) => {
+            const x = Math.max(0, r.dash - r.mine);
+            if (!gapTotal || x < 0.005) return h('span', { class: 'muted' }, '—');
+            return h('span', {}, flagged.has(r.d) ? h('span', { class: 'pill new', style: { marginRight: '6px' }, title: 'One of the few days that hold most of the gap' }, 'look here') : null, fmtPct(x / gapTotal));
+          },
+        },
       ], { initial: 'd', desc: false, onRow: (r) => go(`#/day/${r.d}`) }),
     );
   } else if (days.length) {
@@ -2313,6 +2428,7 @@ subscribe(onDataChange, (st) => {
 });
 
 shell();
+if (!store.get('introSeen', '')) void openIntro();
 window.addEventListener('hashchange', () => {
   shell();
   render();

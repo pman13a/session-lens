@@ -233,6 +233,7 @@ export class TranscriptParser {
       idx.reportedCostUSD = d.totalCostUSD;
       // Claude Code's own running total at this point in the file: a checkpoint to reconcile against.
       idx.costCheckpoint = { totalUSD: d.totalCostUSD, recordCount: idx.records.length, ts: idx.lastTs };
+      (idx.costCheckpoints ??= []).push(idx.costCheckpoint);
     }
     if (type !== 'user' && type !== 'assistant' && type !== 'attachment' && type !== 'system') return;
     if (!d.uuid || this.seen.has(d.uuid)) return;

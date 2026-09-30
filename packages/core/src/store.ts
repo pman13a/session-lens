@@ -555,25 +555,46 @@ export class Store extends EventEmitter {
 
   /**
    * Claude Code writes its own running cost (`cost-state`) into the transcript now and then. It includes
-   * calls it never writes as records: title generation, safety checks, fetch summaries. At the last
-   * checkpoint, the difference between that figure and what the records add up to is those side calls.
-   * Spread it over the requests before the checkpoint so days and totals include it.
+   * calls it never writes as records: title generation, safety checks, fetch summaries. The total
+   * restarts every time the app restarts, so a long session is several runs: split the checkpoints where
+   * the total drops, and compare each run's last figure with the records of that run. The difference is
+   * that run's side calls, spread over its requests so days and totals include it.
    */
   private reconcile(s: Session, position: Map<string, number>) {
     const f = s.mainFile ? this.files.get(s.mainFile) : undefined;
-    const cp = f?.costCheckpoint;
-    if (!cp) return;
-    const before = this.sessionRequests(s).filter((r) => (r.agentId ? r.ts <= cp.ts : (position.get(r.id) ?? Infinity) < cp.recordCount));
-    if (!before.length || before.some((r) => !r.priced)) return;
-    const list = before.reduce((a, r) => a + this.pricer.listCost(r.model, r.usage), 0);
-    const gap = cp.totalUSD - list;
-    // Only a plausible gap is side calls; a large one means Claude Code priced differently.
-    if (gap <= 0.005 || gap > list * 0.25) return;
-    const factor = this.pricer.discountFactor(before[0].model);
-    s.sideCost = gap * factor;
-    s.checkpoint = { claudeCodeUSD: cp.totalUSD, transcriptUSD: list, ts: cp.ts };
-    const total = before.reduce((a, r) => a + r.cost, 0) || 1;
-    for (const r of before) r.side = (s.sideCost * r.cost) / total;
+    const cps = f?.costCheckpoints ?? (f?.costCheckpoint ? [f.costCheckpoint] : []);
+    if (!f || !cps.length) return;
+    // The last checkpoint of each run: the one before the total drops, and the final one.
+    const ends = cps.filter((cp, i) => i === cps.length - 1 || cps[i + 1].totalUSD < cp.totalUSD - 1e-9);
+    const all = this.sessionRequests(s);
+    let claudeCode = 0;
+    let transcript = 0;
+    let side = 0;
+    let checked = 0;
+    ends.forEach((cp, k) => {
+      const prev = k ? ends[k - 1] : undefined;
+      const from = prev?.recordCount ?? 0;
+      const fromTs = prev?.ts ?? -Infinity;
+      const run = all.filter((r) =>
+        r.agentId ? r.ts > fromTs && r.ts <= cp.ts : (position.get(r.id) ?? -1) >= from && (position.get(r.id) ?? Infinity) < cp.recordCount && r.file === f.path,
+      );
+      if (!run.length || run.some((r) => !r.priced)) return;
+      const list = run.reduce((a, r) => a + this.pricer.listCost(r.model, r.usage), 0);
+      const gap = cp.totalUSD - list;
+      claudeCode += cp.totalUSD;
+      transcript += list;
+      checked++;
+      // Only a plausible gap is side calls; a large one means Claude Code priced differently, or the
+      // run boundary is off (a request just after a checkpoint can belong to either run).
+      if (gap <= 0.005 || gap > list * 0.25) return;
+      const runSide = gap * this.pricer.discountFactor(run[0].model);
+      side += runSide;
+      const total = run.reduce((a, r) => a + r.cost, 0) || 1;
+      for (const r of run) r.side += (runSide * r.cost) / total;
+    });
+    if (!checked) return;
+    s.sideCost = side;
+    s.checkpoint = { claudeCodeUSD: claudeCode, transcriptUSD: transcript, ts: cps[cps.length - 1].ts, runs: ends.length, checkedRuns: checked };
   }
 
   /** All requests of a session: main thread plus every subagent. */

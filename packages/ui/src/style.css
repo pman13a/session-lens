@@ -20,6 +20,7 @@
   --series-7: #4a3aa7;
   --series-8: #e34948;
   --other: #b5b3ab;
+  --good: #0ca30c;
   --warning: #fab219;
   --critical: #d03b3b;
   --font: system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -99,6 +100,18 @@ nav.crumbs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; colo
 nav.crumbs a { color: var(--text-secondary); }
 nav.crumbs .sep { color: var(--axis); }
 nav.crumbs .here { color: var(--text-primary); font-weight: 600; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+nav.crumbs .trail { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* Drill-down pages: a real page header, so a session never looks like the overview. */
+nav.crumbs.page { align-items: flex-start; gap: 14px; flex-wrap: nowrap; padding: 4px 0 14px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+nav.crumbs.page .back { flex: none; margin-top: 2px; font-weight: 600; text-decoration: none; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+nav.crumbs.page .page-title { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+nav.crumbs.page .trail { font-size: 12px; }
+nav.crumbs.page .trail .here { font-weight: 400; color: var(--text-muted); }
+nav.crumbs.page .kind { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--series-1); margin-top: 4px; }
+nav.crumbs.page .page-actions { margin-left: auto; flex: none; align-self: flex-end; }
+nav.crumbs.page .page-actions .seg button { padding: 6px 14px; font-weight: 600; }
+nav.crumbs.page .page-actions .seg button:disabled { opacity: 0.4; cursor: default; }
+nav.crumbs.page h1 { margin: 0; font-size: 22px; line-height: 1.25; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-width: 0; }
@@ -148,12 +161,48 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 
 .turn { border-top: 1px solid var(--grid); padding: 8px 0; }
 .turn:first-child { border-top: 0; }
-.turn summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; list-style: none; }
+/* Prompt rows and their header share one grid, so every value sits under its column title. */
+.turns-grid { --turn-cols: 12px 30px 40px minmax(0, 1fr) 64px 84px 76px 110px 76px 84px 72px; }
+.turn summary { cursor: pointer; display: grid; grid-template-columns: var(--turn-cols); column-gap: 10px; align-items: center; list-style: none; }
+.turn summary .who { display: block; }
+.turn summary .prompt-no { text-align: right; min-width: 0 !important; }
+.turn summary .req-count { justify-self: center; }
+.turn summary .req-range { text-align: right; }
+.turn summary .heat, .turn summary .heat-empty, .turn summary .total { justify-self: end; }
+.turn summary .tag { justify-self: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .turn summary::-webkit-details-marker { display: none; }
 .turn summary .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn summary .prompt { flex: 1; min-width: 0; position: relative; display: flex; }
+.turn summary .prompt .t { flex: 1; }
+.turn summary .prompt-full {
+  display: none; position: absolute; top: calc(100% + 2px); left: 0; z-index: 30;
+  width: min(760px, 80vw); max-height: 50vh; overflow: auto; padding: 10px 12px;
+  background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.45; cursor: text;
+}
+/* A short delay so skimming down the list doesn't flash popovers; stays open while the pointer is inside it. */
+.turn summary .prompt:hover .prompt-full { display: block; animation: prompt-in 0s 0.35s both; }
+@keyframes prompt-in { from { visibility: hidden; } to { visibility: visible; } }
 .turn summary::before { content: '▸'; color: var(--text-muted); width: 10px; flex: none; }
 .turn[open] summary::before { content: '▾'; }
 .turn table { margin-top: 6px; }
+.heat { display: inline-block; min-width: 64px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
+.turn summary .prompt-no { flex: none; color: var(--text-muted); font-weight: 600; font-size: 12px; min-width: 76px; white-space: nowrap; }
+/* Low-profile request count: small, outlined, muted, fixed width so the prompt text lines up. */
+.turn summary .req-count { flex: none; min-width: 34px; text-align: center; font-size: 11px; line-height: 16px; padding: 0 5px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.turn summary .req-range { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.turn summary .tag { flex: none; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
+.turn summary .tag.mode { min-width: 52px; text-align: center; }
+.turn summary .tag.model { min-width: 70px; text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Plan mode stands out; every other mode stays muted. */
+.turn summary .tag.mode.plan { color: #fff; background: var(--series-7); border-color: var(--series-7); font-weight: 600; }
+.turn summary .heat-empty { flex: none; min-width: 72px; text-align: right; color: var(--text-muted); }
+.turn summary .total { flex: none; min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.turn-head { display: grid; grid-template-columns: var(--turn-cols); column-gap: 10px; padding: 6px 0 4px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--grid); }
+.turn-head span { text-align: right; white-space: nowrap; }
+.turn-head span:nth-child(3), .turn-head span:nth-child(5), .turn-head span:nth-child(6) { text-align: center; }
+.turn-head span.left { text-align: left; }
+.turn summary .heat { flex: none; min-width: 72px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-variant-numeric: tabular-nums; }
 
 .raw { position: fixed; right: 0; top: 0; bottom: 0; width: min(640px, 100vw); background: var(--surface-1); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12); display: flex; flex-direction: column; z-index: 20; }
 .raw header { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--grid); }
@@ -166,3 +215,26 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
 .err { color: var(--critical); }
 svg.spark { display: block; }
+
+.live-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.pill.live { background: rgba(12, 163, 12, 0.14); color: var(--text-primary); margin-right: 6px; font-weight: 600; }
+.pill.live::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--good); margin-right: 4px; vertical-align: 1px; }
+/* A control that belongs to one panel of a multi-panel chart, pinned level with that panel's title. */
+.panel-control { position: absolute; right: 16px; z-index: 2; }
+.panel-control .seg button { padding: 2px 10px; font-size: 12px; }
+
+/* Launch screen */
+.intro-overlay { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.5); display: flex; align-items: flex-start; justify-content: center; padding: 5vh 16px; overflow: auto; }
+.intro { background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 14px; width: min(760px, 100%); padding: 20px 24px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35); }
+.intro header { display: flex; align-items: center; justify-content: space-between; }
+.intro h2 { display: flex; gap: 8px; align-items: center; margin: 0; font-size: 20px; }
+.intro .lead { font-size: 15px; color: var(--text-secondary); margin: 8px 0 4px; }
+.intro section { border-top: 1px solid var(--grid); margin-top: 14px; padding-top: 10px; }
+.intro h3 { margin: 0 0 6px; font-size: 14px; }
+.intro ul { margin: 4px 0; padding-left: 18px; line-height: 1.5; font-size: 13.5px; }
+.intro li { margin: 3px 0; }
+.intro p { font-size: 13.5px; margin: 6px 0; line-height: 1.5; }
+.intro code { font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+.intro footer { display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--grid); margin-top: 16px; padding-top: 12px; }
+.intro footer .spacer { flex: 1; }
+.btn.primary { background: var(--series-1); border-color: var(--series-1); color: #fff; font-weight: 600; }

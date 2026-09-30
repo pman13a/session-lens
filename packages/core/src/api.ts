@@ -1,7 +1,12 @@
-import { attribute, threadRequests } from './attribution.js';
+import { attribute, sessionComposition, threadRequests } from './attribution.js';
+import { account, billingPeriod, sanitizeSettings, type AccountInfo } from './account.js';
 import { blockText } from './parse.js';
+import { bundledPricing, deriveCache } from './pricing.js';
+import { comparePrices, fetchPublishedPricing, type PublishedModel } from './published.js';
+import { parseDailyPaste, referencePath, saveReference, usageView, type GroupBy } from './usage.js';
 import type { Store } from './store.js';
-import type { Request, Session } from './types.js';
+import type { Settings } from './types.js';
+import type { Request, RequestRole, Session } from './types.js';
 
 export interface DayRow {
   day: string;
@@ -13,7 +18,7 @@ export interface DayRow {
   requests: number;
   sessions: number;
   costByModel: Record<string, number>;
-  costParts: { input: number; cacheWrite: number; cacheRead: number; output: number };
+  costParts: { input: number; cacheWrite: number; cacheRead: number; output: number; side: number };
 }
 
 export interface SessionRow {
@@ -32,10 +37,28 @@ export interface SessionRow {
   cost: number;
   /** Cost of the whole session, including requests outside the selected range. */
   totalCost: number;
+  /** A Claude Code process for this session is running now. */
+  live: boolean;
   peakContext: number;
   peakContextPct: number;
   /** Context size per main-thread request, for a sparkline. */
   spark: number[];
+  /** Requests and cost by why they happened: your prompts, Claude's iterations, subagents… */
+  byRole: RoleSplit;
+}
+
+export type RoleSplit = Partial<Record<RequestRole, { requests: number; cost: number; output: number }>>;
+
+/** Split requests by role. Side calls go with the request they were spread over. */
+export function roleSplit(reqs: Request[]): RoleSplit {
+  const out: RoleSplit = {};
+  for (const r of reqs) {
+    const e = (out[r.role] ??= { requests: 0, cost: 0, output: 0 });
+    e.requests++;
+    e.cost += r.cost + r.side;
+    e.output += r.usage.output;
+  }
+  return out;
 }
 
 export interface Query {
@@ -81,14 +104,15 @@ export class Api {
       const d = this.day(r.ts);
       let row = rows.get(d);
       if (!row) {
-        row = { day: d, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cost: 0, costParts: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 }, requests: 0, sessions: 0, costByModel: {}, _sessions: new Set() };
+        row = { day: d, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cost: 0, costParts: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, side: 0 }, requests: 0, sessions: 0, costByModel: {}, _sessions: new Set() };
         rows.set(d, row);
       }
       row.input += r.usage.input;
       row.cacheWrite += r.usage.cacheWrite5m + r.usage.cacheWrite1h;
       row.cacheRead += r.usage.cacheRead;
       row.output += r.usage.output;
-      row.cost += r.cost;
+      row.cost += r.cost + r.side;
+      row.costParts.side += r.side;
       const parts = this.store.pricer.costParts(r.model, r.usage);
       row.costParts.input += parts.input;
       row.costParts.cacheWrite += parts.cacheWrite;
@@ -97,7 +121,7 @@ export class Api {
       row.requests++;
       row._sessions.add(r.sessionId);
       const m = shortModel(r.model);
-      row.costByModel[m] = (row.costByModel[m] ?? 0) + r.cost;
+      row.costByModel[m] = (row.costByModel[m] ?? 0) + r.cost + r.side;
     }
     const days = [...rows.values()]
       .sort((a, b) => a.day.localeCompare(b.day))
@@ -122,8 +146,49 @@ export class Api {
       models: [...new Set(reqs.map((r) => shortModel(r.model)))].sort(),
       range: { first: allDays[0], last: allDays[allDays.length - 1] },
       discount: this.store.pricer.discount,
-      unknownModels: [...new Set(all.map((r) => r.model).filter((m) => !this.store.pricer.isKnown(m)))],
+      unknownModels: [...new Set(all.filter((r) => !r.priced).map((r) => r.model))],
+      unpricedRequests: reqs.filter((r) => !r.priced).length,
+      sideCost: sum(reqs, (r) => r.side),
+      byRole: roleSplit(reqs),
+      history: this.history(),
+      live: this.liveSessions(),
     };
+  }
+
+  /** How far back transcripts go, and how far Claude Code keeps them (it deletes older ones). */
+  history() {
+    const ret = this.store.retention;
+    let oldest = Infinity;
+    for (const r of this.store.requests.values()) if (r.ts < oldest) oldest = r.ts;
+    return {
+      oldestDay: Number.isFinite(oldest) ? this.day(oldest) : undefined,
+      retentionDays: ret.days,
+      keptSince: this.day(ret.since),
+    };
+  }
+
+  /** Sessions whose Claude Code process is running right now, most recently active first. */
+  liveSessions() {
+    const out = [];
+    for (const [id, l] of this.store.live) {
+      const s = this.store.sessions.get(id);
+      const reqs = s ? this.store.sessionRequests(s) : [];
+      const main = reqs.filter((r) => !r.agentId);
+      const last = main[main.length - 1];
+      out.push({
+        id,
+        title: s?.title ?? l.name ?? '(new session)',
+        project: s?.project,
+        entrypoint: l.entrypoint,
+        pid: l.pid,
+        lastTs: s?.lastTs ?? 0,
+        cost: sum(reqs, (r) => r.cost + r.side),
+        contextTokens: last?.contextTokens ?? 0,
+        contextLimit: last?.contextLimit ?? 0,
+        requests: reqs.length,
+      });
+    }
+    return out.sort((a, b) => b.lastTs - a.lastTs);
   }
 
   sessions(q: Query): { sessions: SessionRow[] } {
@@ -142,8 +207,10 @@ export class Api {
       let peak = 0;
       let peakPct = 0;
       for (const r of reqs) {
-        if (r.contextTokens > peak) peak = r.contextTokens;
-        peakPct = Math.max(peakPct, r.contextTokens / r.contextLimit);
+        if (r.contextTokens > peak) {
+          peak = r.contextTokens;
+          peakPct = r.contextTokens / r.contextLimit;
+        }
       }
       rows.push({
         id,
@@ -158,11 +225,13 @@ export class Api {
         cacheWrite: sum(reqs, (r) => r.usage.cacheWrite5m + r.usage.cacheWrite1h),
         cacheRead: sum(reqs, (r) => r.usage.cacheRead),
         output: sum(reqs, (r) => r.usage.output),
-        cost: sum(reqs, (r) => r.cost),
-        totalCost: sum(all, (r) => r.cost),
+        cost: sum(reqs, (r) => r.cost + r.side),
+        totalCost: sum(all, (r) => r.cost + r.side),
+        live: this.store.live.has(id),
         peakContext: peak,
         peakContextPct: peakPct,
         spark: main.map((r) => r.contextTokens),
+        byRole: roleSplit(reqs),
       });
     }
     rows.sort((a, b) => b.cost - a.cost);
@@ -184,7 +253,12 @@ export class Api {
         firstTs: s.firstTs,
         lastTs: s.lastTs,
         reportedCostUSD: s.reportedCostUSD,
-        cost: sum(reqs, (r) => r.cost),
+        cost: sum(reqs, (r) => r.cost + r.side),
+        sideCost: s.sideCost,
+        checkpoint: s.checkpoint,
+        live: this.store.live.has(s.id),
+        unpriced: reqs.filter((r) => !r.priced).length,
+        byRole: roleSplit(reqs),
       },
       requests: reqs.map((r) => ({
         id: r.id,
@@ -194,12 +268,16 @@ export class Api {
         agentId: r.agentId,
         usage: r.usage,
         cost: r.cost,
+        priced: r.priced,
+        side: r.side,
         costParts: this.store.pricer.costParts(r.model, r.usage),
         contextTokens: r.contextTokens,
         contextLimit: r.contextLimit,
         tools: r.tools,
         promptId: r.promptId,
         stopReason: r.stopReason,
+        role: r.role,
+        trigger: r.trigger,
       })),
       turns,
       subagents: s.subagents
@@ -211,8 +289,9 @@ export class Api {
             agentType: a.agentType,
             description: a.description,
             toolUseId: a.toolUseId,
+            launchedBy: a.launchedBy,
             requests: rs.length,
-            cost: sum(rs, (r) => r.cost),
+            cost: sum(rs, (r) => r.cost + r.side),
             firstTs: Math.min(...rs.map((r) => r.ts)),
             model: rs[0] ? shortModel(rs[0].model) : undefined,
           };
@@ -223,13 +302,24 @@ export class Api {
   /** A turn = one human prompt and every request (main + subagent) that answered it. */
   private turns(s: Session, reqs: Request[]) {
     const file = s.mainFile;
-    const prompts = new Map<string, { text: string; ts: number }>();
+    const prompts = new Map<string, { text: string; full: string; ts: number; mode?: string }>();
     if (file) {
       const f = this.store.files.get(file);
       for (const r of f?.records ?? []) {
         if (r.type === 'user' && r.promptId && r.isHuman && !prompts.has(r.promptId)) {
-          const p = r.pieces.find((x) => x.kind === 'prompt' || x.kind === 'meta');
-          if (p) prompts.set(r.promptId, { text: p.label, ts: r.ts });
+          const texts = r.pieces.filter((x) => x.kind === 'prompt' || x.kind === 'meta');
+          if (!texts.length) continue;
+          // The whole prompt, for reading on hover (read back from the file; capped so a huge paste stays light).
+          let full = '';
+          try {
+            const line = this.store.readRecord(file, r);
+            full = texts.map((x) => blockText(line, x.block)).join('\n\n');
+          } catch {
+            full = texts.map((x) => x.label).join('\n\n');
+          }
+          const CAP = 8000;
+          if (full.length > CAP) full = full.slice(0, CAP) + `\n… (${full.length - CAP} more characters)`;
+          prompts.set(r.promptId, { text: texts[0].label, full, ts: r.ts, mode: r.permissionMode });
         }
       }
     }
@@ -253,10 +343,16 @@ export class Api {
       .map(([promptId, rs]) => ({
         promptId,
         text: prompts.get(promptId)?.text ?? (promptId === 'unknown' ? '(no prompt found)' : '(prompt not in this file)'),
+        fullText: prompts.get(promptId)?.full,
+        mode: prompts.get(promptId)?.mode,
+        // Models that answered, most-used first; subagent models listed separately.
+        models: byCount(rs.filter((r) => !r.agentId).map((r) => shortModel(r.model))),
+        subagentModels: byCount(rs.filter((r) => r.agentId).map((r) => shortModel(r.model))),
         ts: prompts.get(promptId)?.ts ?? rs[0].ts,
         requestIds: rs.map((r) => r.id),
-        cost: sum(rs, (r) => r.cost),
+        cost: sum(rs, (r) => r.cost + r.side),
         output: sum(rs, (r) => r.usage.output),
+        byRole: roleSplit(rs),
       }))
       .sort((a, b) => a.ts - b.ts);
   }
@@ -277,11 +373,23 @@ export class Api {
         agentId: r.agentId,
         usage: r.usage,
         cost: r.cost,
+        priced: r.priced,
+        side: r.side,
         costParts: this.store.pricer.costParts(r.model, r.usage),
         contextTokens: r.contextTokens,
         contextLimit: r.contextLimit,
         tools: r.tools,
         stopReason: r.stopReason,
+        role: r.role,
+        trigger: r.trigger,
+        launched: s?.subagents.filter((x) => x.launchedBy === r.id && x.requestIds.length).map((x) => {
+          const rs = x.requestIds.map((rid) => this.store.requests.get(rid)!).filter(Boolean);
+          return { agentId: x.agentId, agentType: x.agentType, description: x.description, requests: rs.length, cost: sum(rs, (q) => q.cost + q.side), firstRequestId: rs.sort((a, b) => a.ts - b.ts)[0]?.id };
+        }) ?? [],
+        subagent: r.agentId ? (() => {
+          const x = s?.subagents.find((a) => a.agentId === r.agentId);
+          return x ? { agentType: x.agentType, description: x.description, launchedBy: x.launchedBy } : undefined;
+        })() : undefined,
       },
       session: s ? { id: s.id, title: s.title, project: s.project } : undefined,
       thread: { index: pos, count: thread.length, prev: thread[pos - 1]?.id, next: thread[pos + 1]?.id },
@@ -295,13 +403,149 @@ export class Api {
     if (!r) return undefined;
     const rec = this.store.record(r.file, uuid);
     if (!rec) return undefined;
-    const text = blockText(this.store.readLine(r.file, rec.line), block);
+    const text = blockText(this.store.readRecord(r.file, rec), block);
     const LIMIT = 200_000;
     return { text: text.length > LIMIT ? text.slice(0, LIMIT) + `\n… (${text.length - LIMIT} more characters)` : text };
   }
 
-  /** One entry point for every shell: HTTP server, VS Code message bridge, Electron. */
-  handle(path: string, params: URLSearchParams): unknown {
+  /** Detected login, saved overrides, and spend in the current billing period. */
+  account(detect: () => AccountInfo = account) {
+    this.store.refresh();
+    const info = detect();
+    const st = this.store.settings;
+    const mode = st.billing ?? info.detected;
+    const period = billingPeriod(new Date(), st.periodStartDay ?? 1);
+    let cost = 0;
+    for (const r of this.store.requests.values()) {
+      const d = this.day(r.ts);
+      if (d >= period.start && d <= period.end) cost += r.cost + r.side;
+    }
+    return {
+      account: info,
+      mode,
+      overridden: st.billing != null,
+      // The plan fee: what you typed under Plan…, else what the detected plan implies.
+      planPrice: st.planPrice ?? info.impliedPlanPrice ?? null,
+      planPriceSource: st.planPrice != null ? 'settings' : info.impliedPlanPrice != null ? 'plan' : null,
+      settings: { billing: st.billing ?? 'auto', planPrice: st.planPrice ?? null, monthlyLimit: st.monthlyLimit ?? null, periodStartDay: st.periodStartDay ?? 1, discount: st.discount ?? 0 },
+      period: { ...period, cost, projected: period.daysElapsed ? (cost / period.daysElapsed) * period.days : cost },
+    };
+  }
+
+  /** Save a settings patch from the UI to the shared settings file and re-price everything. */
+  updateSettings(body: unknown) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'expected a JSON object' };
+    const raw = body as Record<string, unknown>;
+    const patch = sanitizeSettings(raw);
+    const next = { ...this.store.settings } as Record<string, unknown>;
+    // Price edits merge per model (null removes the edit, restoring the layer underneath).
+    if (raw.prices && typeof raw.prices === 'object') {
+      const merged = { ...(this.store.settings.prices ?? {}) };
+      for (const [id, v] of Object.entries(raw.prices as Record<string, unknown>)) {
+        if (v === null) delete merged[id];
+        else if (patch.prices?.[id]) merged[id] = { ...(merged[id] ?? {}), ...patch.prices[id] };
+      }
+      patch.prices = Object.keys(merged).length ? merged : undefined;
+    }
+    for (const [k, v] of Object.entries(patch)) (v === undefined ? delete next[k] : (next[k] = v));
+    this.store.writeSettings(next as Settings);
+    this.day = dayFormatter(this.store.settings.timeZone);
+    return this.account();
+  }
+
+  /** The price table: every priced model, where its price came from, and whether your data uses it. */
+  pricing() {
+    this.store.refresh();
+    const file = bundledPricing();
+    const usage = new Map<string, { requests: number; lastTs: number; models: Set<string> }>();
+    const unpriced = new Map<string, { requests: number; lastTs: number }>();
+    for (const r of this.store.requests.values()) {
+      const key = this.store.pricer.keyFor(r.model);
+      if (!key) {
+        const u = unpriced.get(r.model) ?? { requests: 0, lastTs: 0 };
+        u.requests++;
+        u.lastTs = Math.max(u.lastTs, r.ts);
+        unpriced.set(r.model, u);
+        continue;
+      }
+      const u = usage.get(key) ?? { requests: 0, lastTs: 0, models: new Set<string>() };
+      u.requests++;
+      u.lastTs = Math.max(u.lastTs, r.ts);
+      u.models.add(r.model);
+      usage.set(key, u);
+    }
+    const st = this.store.settings;
+    return {
+      checkedAt: file.checkedAt,
+      sourceUrl: file.sourceUrl,
+      webSearchPerRequest: file.webSearchPerRequest,
+      appliedFromAnthropic: st.published?.fetchedAt,
+      models: this.store.pricer.table().map((m) => ({
+        ...m,
+        bundled: file.models[m.id],
+        edited: st.prices?.[m.id] ?? null,
+        usage: usage.has(m.id) ? { requests: usage.get(m.id)!.requests, lastTs: usage.get(m.id)!.lastTs, ids: [...usage.get(m.id)!.models] } : null,
+      })),
+      unpriced: [...unpriced.entries()].map(([model, u]) => ({ model, ...u })),
+      discount: st.discount ?? 0,
+      modelDiscounts: st.modelDiscounts ?? {},
+      defaults: deriveCache(1),
+    };
+  }
+
+  /** Fetch Anthropic's pricing page and compare it with what is in effect. The only network request. */
+  async checkPublished(fetchImpl?: typeof fetch) {
+    const pub = await fetchPublishedPricing(fetchImpl);
+    const pricer = this.store.pricer;
+    const rows = comparePrices(pub.models, (id) => ({ price: pricer.price(id), known: pricer.isKnown(id) }));
+    return { fetchedAt: pub.fetchedAt, url: pub.url, models: rows.map((r) => ({ ...r, source: pricer.sources[pricer.keyFor(r.id) ?? ''] ?? null })) };
+  }
+
+  /** Apply published prices (all, or the ones listed) as the "from Anthropic" layer. */
+  applyPublished(body: unknown) {
+    const b = (body ?? {}) as { models?: unknown; fetchedAt?: unknown };
+    if (!Array.isArray(b.models)) return { error: 'expected { models: [...] }' };
+    const ok = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000;
+    const layer = { ...(this.store.settings.published?.models ?? {}) };
+    for (const m of b.models as PublishedModel[]) {
+      if (!m || typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9.\-]*$/i.test(m.id)) continue;
+      if (![m.input, m.output, m.cacheWrite5m, m.cacheWrite1h, m.cacheRead].every(ok)) continue;
+      const context = this.store.pricer.price(m.id).context;
+      layer[m.id] = { input: m.input, output: m.output, cacheWrite5m: m.cacheWrite5m, cacheWrite1h: m.cacheWrite1h, cacheRead: m.cacheRead, context };
+    }
+    const fetchedAt = typeof b.fetchedAt === 'string' ? b.fetchedAt : new Date().toISOString();
+    // Applying is a choice to use Anthropic's price, so it replaces your edit of the same fields.
+    const prices = { ...(this.store.settings.prices ?? {}) };
+    for (const m of b.models as PublishedModel[]) {
+      const e = m && typeof m.id === 'string' ? prices[m.id] : undefined;
+      if (!e || !layer[m.id]) continue;
+      const rest = Object.fromEntries(Object.entries(e).filter(([k]) => k === 'context'));
+      if (Object.keys(rest).length) prices[m.id] = rest;
+      else delete prices[m.id];
+    }
+    this.store.writeSettings({ ...this.store.settings, prices: Object.keys(prices).length ? prices : undefined, published: { fetchedAt, models: layer } });
+    return this.pricing();
+  }
+
+  /** What Session Lens reads and where it keeps things, for the Settings page. */
+  config() {
+    const st = this.store.settings;
+    return {
+      roots: this.store.roots,
+      configDirs: this.store.configDirs,
+      retentionDays: this.store.retention.days,
+      settingsPath: this.store.settingsPath,
+      timeZone: st.timeZone ?? null,
+      systemTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      transcripts: this.store.files.size,
+      sessions: this.store.sessions.size,
+      requests: this.store.requests.size,
+      live: this.store.live.size,
+    };
+  }
+
+  /** One entry point for every shell: HTTP server, VS Code message bridge, Electron. May return a promise. */
+  handle(path: string, params: URLSearchParams, body?: unknown): unknown {
     const q: Query = { from: params.get('from') ?? undefined, to: params.get('to') ?? undefined, project: params.get('project') ?? undefined };
     switch (path) {
       case '/api/summary':
@@ -312,12 +556,54 @@ export class Api {
         return this.session(params.get('id') ?? '') ?? { error: 'not found' };
       case '/api/request':
         return this.request(params.get('id') ?? '') ?? { error: 'not found' };
+      case '/api/account':
+        return this.account();
+      case '/api/pricing':
+        return this.pricing();
+      case '/api/pricing/check':
+        return body === undefined ? { error: 'POST to check' } : this.checkPublished().catch((e) => ({ error: String(e?.message ?? e) }));
+      case '/api/pricing/apply':
+        return body === undefined ? { error: 'POST { models }' } : this.applyPublished(body);
+      case '/api/config':
+        return this.config();
+      case '/api/settings':
+        return body === undefined ? { error: 'POST a JSON object' } : this.updateSettings(body);
+      case '/api/usage':
+        return usageView(this.store, {
+          from: params.get('from') ?? undefined,
+          to: params.get('to') ?? undefined,
+          group: (params.get('group') as GroupBy) ?? undefined,
+          interval: params.get('interval') === 'week' ? 'week' : 'day',
+          project: params.get('project') ?? undefined,
+        });
+      case '/api/reference': {
+        if (body === undefined || body === null || typeof body !== 'object') return { error: 'POST a JSON object' };
+        const b = body as { paste?: unknown; year?: unknown; days?: Record<string, unknown> };
+        const patch: Record<string, unknown> = { ...b };
+        if (typeof b.paste === 'string') {
+          const parsed = parseDailyPaste(b.paste, typeof b.year === 'number' ? b.year : new Date().getUTCFullYear());
+          patch.days = { ...(b.days ?? {}), ...parsed };
+          delete patch.paste;
+        }
+        saveReference(referencePath(this.store.settingsPath), patch);
+        return { ok: true };
+      }
+      case '/api/composition':
+        this.store.refresh();
+        return { points: sessionComposition(this.store, params.get('id') ?? '') };
       case '/api/raw':
         return this.raw(params.get('request') ?? '', params.get('uuid') ?? '', Number(params.get('block') ?? 0)) ?? { error: 'not found' };
       default:
         return { error: `unknown endpoint ${path}` };
     }
   }
+}
+
+/** Distinct values, most frequent first. */
+function byCount(xs: string[]): string[] {
+  const n = new Map<string, number>();
+  for (const x of xs) n.set(x, (n.get(x) ?? 0) + 1);
+  return [...n.entries()].sort((a, b) => b[1] - a[1]).map(([x]) => x);
 }
 
 function sum<T>(xs: T[], f: (x: T) => number) {

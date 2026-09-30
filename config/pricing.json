@@ -1,23 +1,157 @@
 {
-  "_comment": "USD per million tokens. Matched by longest id prefix after stripping date suffixes and [1m]. cacheWrite5m = 1.25x input, cacheWrite1h = 2x input. Verified: claude-opus-5-5 rates reproduce Claude Code's own cost-state totalCostUSD to the cent.",
+  "_comment": "USD per million tokens. Matched by longest id prefix after stripping date suffixes and [1m]. Cache prices are listed per model: most read at 0.1x input, but Opus 5.5 reads at 0.05x and Fable/Mythos 5.1 at 0.025x. checkedAt is when this table was last compared with sourceUrl. fast: fast-mode input/output rates (cache prices scale with input). usGeoMultiplier: US-only inference (usage.inference_geo = us).",
   "webSearchPerRequest": 0.01,
   "models": {
-    "claude-fable-5-1":  { "input": 10, "output": 50, "cacheWrite5m": 12.5, "cacheWrite1h": 20, "cacheRead": 0.25, "context": 1000000 },
-    "claude-mythos-5-1": { "input": 10, "output": 50, "cacheWrite5m": 12.5, "cacheWrite1h": 20, "cacheRead": 0.25, "context": 1000000 },
-    "claude-fable-5":    { "input": 10, "output": 50, "cacheWrite5m": 12.5, "cacheWrite1h": 20, "cacheRead": 1.0,  "context": 1000000 },
-    "claude-mythos-5":   { "input": 10, "output": 50, "cacheWrite5m": 12.5, "cacheWrite1h": 20, "cacheRead": 1.0,  "context": 1000000 },
-    "claude-opus-5-5":   { "input": 4,  "output": 20, "cacheWrite5m": 5,    "cacheWrite1h": 8,  "cacheRead": 0.2,  "context": 1000000 },
-    "claude-opus-5":     { "input": 5,  "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5,  "context": 1000000 },
-    "claude-opus-4-8":   { "input": 5,  "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5,  "context": 1000000 },
-    "claude-opus-4-7":   { "input": 5,  "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5,  "context": 1000000 },
-    "claude-opus-4-6":   { "input": 5,  "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5,  "context": 1000000 },
-    "claude-opus-4-5":   { "input": 5,  "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5,  "context": 200000 },
-    "claude-opus-4":     { "input": 15, "output": 75, "cacheWrite5m": 18.75,"cacheWrite1h": 30, "cacheRead": 1.5,  "context": 200000 },
-    "claude-sonnet-5-5": { "input": 2,  "output": 10, "cacheWrite5m": 2.5,  "cacheWrite1h": 4,  "cacheRead": 0.2,  "context": 1000000 },
-    "claude-sonnet-5":   { "input": 2,  "output": 10, "cacheWrite5m": 2.5,  "cacheWrite1h": 4,  "cacheRead": 0.2,  "context": 1000000 },
-    "claude-sonnet-4":   { "input": 3,  "output": 15, "cacheWrite5m": 3.75, "cacheWrite1h": 6,  "cacheRead": 0.3,  "context": 1000000 },
-    "claude-haiku-4-5":  { "input": 1,  "output": 5,  "cacheWrite5m": 1.25, "cacheWrite1h": 2,  "cacheRead": 0.1,  "context": 200000 },
-    "claude-3-5-haiku":  { "input": 0.8,"output": 4,  "cacheWrite5m": 1,    "cacheWrite1h": 1.6,"cacheRead": 0.08, "context": 200000 }
+    "claude-fable-5-1": {
+      "input": 10,
+      "output": 50,
+      "cacheWrite5m": 12.5,
+      "cacheWrite1h": 20,
+      "cacheRead": 0.25,
+      "context": 1000000
+    },
+    "claude-mythos-5-1": {
+      "input": 10,
+      "output": 50,
+      "cacheWrite5m": 12.5,
+      "cacheWrite1h": 20,
+      "cacheRead": 0.25,
+      "context": 1000000
+    },
+    "claude-fable-5": {
+      "input": 10,
+      "output": 50,
+      "cacheWrite5m": 12.5,
+      "cacheWrite1h": 20,
+      "cacheRead": 1.0,
+      "context": 1000000
+    },
+    "claude-mythos-5": {
+      "input": 10,
+      "output": 50,
+      "cacheWrite5m": 12.5,
+      "cacheWrite1h": 20,
+      "cacheRead": 1.0,
+      "context": 1000000
+    },
+    "claude-opus-5-5": {
+      "input": 4,
+      "output": 20,
+      "cacheWrite5m": 5,
+      "cacheWrite1h": 8,
+      "cacheRead": 0.2,
+      "context": 1000000,
+      "fast": {
+        "input": 8,
+        "output": 40
+      }
+    },
+    "claude-opus-5": {
+      "input": 5,
+      "output": 25,
+      "cacheWrite5m": 6.25,
+      "cacheWrite1h": 10,
+      "cacheRead": 0.5,
+      "context": 1000000,
+      "fast": {
+        "input": 10,
+        "output": 50
+      }
+    },
+    "claude-opus-4-8": {
+      "input": 5,
+      "output": 25,
+      "cacheWrite5m": 6.25,
+      "cacheWrite1h": 10,
+      "cacheRead": 0.5,
+      "context": 1000000,
+      "fast": {
+        "input": 10,
+        "output": 50
+      }
+    },
+    "claude-opus-4-7": {
+      "input": 5,
+      "output": 25,
+      "cacheWrite5m": 6.25,
+      "cacheWrite1h": 10,
+      "cacheRead": 0.5,
+      "context": 1000000
+    },
+    "claude-opus-4-6": {
+      "input": 5,
+      "output": 25,
+      "cacheWrite5m": 6.25,
+      "cacheWrite1h": 10,
+      "cacheRead": 0.5,
+      "context": 1000000
+    },
+    "claude-opus-4-5": {
+      "input": 5,
+      "output": 25,
+      "cacheWrite5m": 6.25,
+      "cacheWrite1h": 10,
+      "cacheRead": 0.5,
+      "context": 200000
+    },
+    "claude-opus-4": {
+      "input": 15,
+      "output": 75,
+      "cacheWrite5m": 18.75,
+      "cacheWrite1h": 30,
+      "cacheRead": 1.5,
+      "context": 200000
+    },
+    "claude-sonnet-5-5": {
+      "input": 2,
+      "output": 10,
+      "cacheWrite5m": 2.5,
+      "cacheWrite1h": 4,
+      "cacheRead": 0.2,
+      "context": 1000000
+    },
+    "claude-sonnet-5": {
+      "input": 2,
+      "output": 10,
+      "cacheWrite5m": 2.5,
+      "cacheWrite1h": 4,
+      "cacheRead": 0.2,
+      "context": 1000000
+    },
+    "claude-sonnet-4": {
+      "input": 3,
+      "output": 15,
+      "cacheWrite5m": 3.75,
+      "cacheWrite1h": 6,
+      "cacheRead": 0.3,
+      "context": 1000000
+    },
+    "claude-haiku-4-5": {
+      "input": 1,
+      "output": 5,
+      "cacheWrite5m": 1.25,
+      "cacheWrite1h": 2,
+      "cacheRead": 0.1,
+      "context": 200000
+    },
+    "claude-3-5-haiku": {
+      "input": 0.8,
+      "output": 4,
+      "cacheWrite5m": 1,
+      "cacheWrite1h": 1.6,
+      "cacheRead": 0.08,
+      "context": 200000
+    }
   },
-  "fallback": { "input": 5, "output": 25, "cacheWrite5m": 6.25, "cacheWrite1h": 10, "cacheRead": 0.5, "context": 1000000 }
+  "fallback": {
+    "input": 5,
+    "output": 25,
+    "cacheWrite5m": 6.25,
+    "cacheWrite1h": 10,
+    "cacheRead": 0.5,
+    "context": 1000000
+  },
+  "checkedAt": "2026-09-30",
+  "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "usGeoMultiplier": 1.1
 }

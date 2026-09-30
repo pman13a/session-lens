@@ -7,6 +7,15 @@ export interface Usage {
   output: number;
   thinking: number;
   webSearches: number;
+  /** usage.speed = fast: fast mode, billed at the model's fast rates. */
+  fast?: boolean;
+  /** usage.inference_geo = us: US-only inference, billed at 1.1×. */
+  usOnly?: boolean;
+  /**
+   * Server-side compaction run inside this request (usage.iterations of type compaction). Billed, but
+   * not part of the top-level token counts, and not part of the context window afterwards.
+   */
+  compaction?: Pick<Usage, 'input' | 'cacheWrite5m' | 'cacheWrite1h' | 'cacheRead' | 'output'>;
 }
 
 export type ItemKind =
@@ -42,14 +51,24 @@ export interface Rec {
   parentUuid: string | null;
   type: 'user' | 'assistant' | 'attachment' | 'system';
   ts: number;
-  line: number;
+  /** Byte range of the raw JSONL line, for reading it back on demand. */
+  offset: number;
+  len: number;
   promptId?: string;
   requestId?: string;
   model?: string;
   usage?: Usage;
   stopReason?: string;
+  /** Which Claude Code surface wrote the record: cli, claude-vscode, claude-desktop, remote_mobile, sdk-… */
+  entrypoint?: string;
+  /** Skills invoked here: Skill tool calls, or a /slash command typed by the user. */
+  skills?: string[];
   isMeta?: boolean;
   isHuman?: boolean;
+  /** Who wrote a user record: human, task-notification, … (Claude Code's `origin.kind`). */
+  origin?: string;
+  /** Permission mode the message was sent in: default, plan, acceptEdits, auto, bypassPermissions… */
+  permissionMode?: string;
   pieces: ContentPiece[];
 }
 
@@ -70,6 +89,10 @@ export interface FileIndex {
   records: Rec[];
   /** Claude Code's own running cost for the session, when it wrote one. */
   reportedCostUSD?: number;
+  /** The last such record, with how many records preceded it: used to reconcile. */
+  costCheckpoint?: { totalUSD: number; recordCount: number; ts: number };
+  /** Every cost-state checkpoint in file order. Claude Code's total restarts with each run of the app. */
+  costCheckpoints?: { totalUSD: number; recordCount: number; ts: number }[];
 }
 
 export interface Price {
@@ -79,7 +102,30 @@ export interface Price {
   cacheWrite1h: number;
   cacheRead: number;
   context: number;
+  /** Fast-mode rates, for models that have it. Cache prices scale with input. */
+  fast?: { input: number; output: number };
 }
+
+/**
+ * Why a request happened.
+ * - prompt: the call your message started (Claude's first response to you)
+ * - iteration: Claude calling itself again with tool results, to get your work done
+ * - answer: the last iteration of a turn, which replies to you and stops
+ * - subagent: a request made inside a subagent Claude launched
+ * - auto: started by Claude Code itself (a background task finishing, compaction, a hook)
+ */
+export type RequestRole = 'prompt' | 'iteration' | 'answer' | 'subagent' | 'auto';
+
+export const ROLE_LABEL: Record<RequestRole, string> = {
+  prompt: 'Your prompts',
+  iteration: 'Claude iterating on tool results',
+  answer: 'Final answers to you',
+  subagent: 'Subagents',
+  auto: 'Automatic (background tasks, compaction)',
+};
+
+/** Who put a line item into the context window. */
+export type ItemOrigin = 'you' | 'claude' | 'tool' | 'subagent' | 'system';
 
 export interface Request {
   id: string;
@@ -89,7 +135,12 @@ export interface Request {
   ts: number;
   model: string;
   usage: Usage;
+  /** Dollars for this request's own tokens (0 when the model has no known price). */
   cost: number;
+  /** Its share of side calls reconciled from Claude Code's own tally (see Store.reconcile). */
+  side: number;
+  /** False for a model with no price on file: tokens count, dollars do not. */
+  priced: boolean;
   /** Tokens occupying the context window for this call: input + cache read + cache write. */
   contextTokens: number;
   contextLimit: number;
@@ -100,6 +151,10 @@ export interface Request {
   /** Tools the response called. */
   tools: string[];
   stopReason?: string;
+  entrypoint?: string;
+  role: RequestRole;
+  /** For an iteration: the tools whose results it was answering. For auto: what woke it. */
+  trigger?: string[];
 }
 
 export interface SubagentInfo {
@@ -108,6 +163,8 @@ export interface SubagentInfo {
   description?: string;
   toolUseId?: string;
   requestIds: string[];
+  /** The main-thread request whose Agent/Task tool call launched this subagent. */
+  launchedBy?: string;
 }
 
 export interface Session {
@@ -122,6 +179,9 @@ export interface Session {
   requestIds: string[];
   subagents: SubagentInfo[];
   reportedCostUSD?: number;
+  /** Side calls: Claude Code's own tally minus what the transcript records add up to, at the last checkpoint. */
+  sideCost: number;
+  checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number; runs: number; checkedRuns: number };
 }
 
 export interface Totals {
@@ -133,11 +193,26 @@ export interface Totals {
   requests: number;
 }
 
+/** How usage turns into money: pay per token, a flat subscription, or a Team/Enterprise seat. */
+export type BillingMode = 'api' | 'subscription' | 'team';
+
 export interface Settings {
+  /** Override the detected billing mode. Unset = follow the logged-in account. */
+  billing?: BillingMode;
+  /** Monthly subscription fee in USD (Pro/Max), to compare API-equivalent value against. */
+  planPrice?: number;
+  /** Monthly spend limit in USD (Team/Enterprise allowance, or your own API budget). */
+  monthlyLimit?: number;
+  /** Day of the month the billing period starts (1–28). */
+  periodStartDay?: number;
   /** Fraction taken off every cost, e.g. 0.1 for a 10% negotiated discount. */
   discount?: number;
-  /** Per-model overrides merged over pricing.json, keyed by model id prefix. */
+  /** Per-model discounts by id prefix (longest wins), for contracts that price models differently. */
+  modelDiscounts?: Record<string, number>;
+  /** The user's own price edits, merged over everything else, keyed by model id prefix. */
   prices?: Record<string, Partial<Price>>;
+  /** Prices applied from Anthropic's pricing page (Settings → Check Anthropic's prices), with when. */
+  published?: { fetchedAt: string; models: Record<string, Omit<Price, 'context'> & { context?: number }> };
   /** IANA time zone used to bucket requests into days. Defaults to the system zone. */
   timeZone?: string;
 }

@@ -1,11 +1,11 @@
-import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
-import { DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
+import { BarChart, CustomChart, LineChart, TreemapChart } from 'echarts/charts';
+import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, MarkPointComponent, TitleComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
-import type { ContextItem, CostParts, DayRow, ItemKind, RequestRow } from './api';
+import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, ItemOrigin, RequestRole, RequestRow, UsageView } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
-echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer]);
+echarts.use([BarChart, CustomChart, LineChart, TreemapChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, MarkPointComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
 
 /* ---------- theme from CSS custom properties ---------- */
 
@@ -40,6 +40,8 @@ export const COMPONENTS = [
   { key: 'output', label: 'Output', slot: 4 },
 ] as const;
 export type ComponentKey = (typeof COMPONENTS)[number]['key'];
+/** Cost Claude Code tallied for calls it never wrote to the transcript (titles, checks, fetch summaries). */
+export const SIDE_COMPONENT = { key: 'side' as const, label: 'Side calls', slot: 5 };
 
 /** Context items fold into eight categories (never more than eight hues). */
 export const CATEGORIES = [
@@ -53,6 +55,34 @@ export const CATEGORIES = [
   { key: 'unattributed', label: 'Not in transcript', slot: 0, kinds: ['unattributed'] },
 ] as const;
 
+/** Why a request happened. Same order everywhere: yours first, then what Claude did on its own. */
+export const ROLES: { key: RequestRole; label: string; short: string; slot: number; hint: string }[] = [
+  { key: 'prompt', label: 'Your prompt', short: 'your prompt', slot: 1, hint: 'The call your message started' },
+  { key: 'answer', label: 'Final answer', short: 'answer', slot: 3, hint: 'Claude’s reply to you: the last call of the turn, with no tool calls' },
+  { key: 'iteration', label: 'Claude iterating', short: 'iteration', slot: 4, hint: 'Claude calling the model again with tool results, to get your work done' },
+  { key: 'subagent', label: 'Subagent', short: 'subagent', slot: 7, hint: 'Work inside a subagent Claude launched' },
+  { key: 'auto', label: 'Automatic', short: 'automatic', slot: 0, hint: 'Started by Claude Code itself: a background task finishing, compaction' },
+];
+export const roleOf = (k: RequestRole) => ROLES.find((r) => r.key === k) ?? ROLES[ROLES.length - 1];
+export const roleColor = (k: RequestRole) => {
+  const r = roleOf(k);
+  return r.slot ? series(r.slot) : cssVar('--other');
+};
+
+/** Who put a line item into the context. */
+export const ORIGINS: { key: ItemOrigin; label: string; slot: number; hint: string }[] = [
+  { key: 'you', label: 'You', slot: 1, hint: 'What you typed or pasted' },
+  { key: 'claude', label: 'Claude', slot: 4, hint: 'Claude’s own text, thinking and tool calls' },
+  { key: 'tool', label: 'Tool output', slot: 2, hint: 'Results of the tools Claude ran' },
+  { key: 'subagent', label: 'Subagent results', slot: 7, hint: 'What subagents reported back' },
+  { key: 'system', label: 'Claude Code', slot: 0, hint: 'System prompt, tool definitions, reminders, and what the transcript does not show' },
+];
+export const originOf = (k: ItemOrigin) => ORIGINS.find((o) => o.key === k) ?? ORIGINS[ORIGINS.length - 1];
+export const originColor = (k: ItemOrigin) => {
+  const o = originOf(k);
+  return o.slot ? series(o.slot) : cssVar('--other');
+};
+
 export function categoryOf(kind: ItemKind) {
   return CATEGORIES.find((c) => (c.kinds as readonly string[]).includes(kind)) ?? CATEGORIES[CATEGORIES.length - 1];
 }
@@ -60,10 +90,25 @@ export function categoryColor(c: (typeof CATEGORIES)[number]): string {
   return c.slot ? series(c.slot) : cssVar('--other');
 }
 
+/** Round an axis top up to a clean value (1, 2, 2.5, 5 × 10ⁿ) so the last tick reads naturally. */
+export function niceCeil(v: number): number {
+  if (!(v > 0)) return 1;
+  const mag = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 2, 2.5, 5, 10]) if (v <= m * mag) return m * mag;
+  return 10 * mag;
+}
+
+/** Off while redrawing live, so charts update in place instead of re-animating from zero. */
+let animate = true;
+export function setAnimation(on: boolean) {
+  animate = on;
+}
+
 function base() {
   const text2 = cssVar('--text-secondary');
   const muted = cssVar('--text-muted');
   return {
+    animation: animate,
     animationDuration: 250,
     textStyle: { fontFamily: cssVar('--font'), color: text2 },
     tooltip: {
@@ -119,7 +164,10 @@ export function dailyChart(
   const b = base();
   const chart = mount(el);
   const surface = cssVar('--surface-1');
-  const valueOf = (d: DayRow, k: ComponentKey) => (mode === 'cost' ? d.costParts[k] : d[k]);
+  // In cost mode, side calls (from Claude Code's own tally) get their own segment when there are any.
+  const comps: { key: ComponentKey | 'side'; label: string; slot: number }[] =
+    mode === 'cost' && days.some((d) => (d.costParts.side ?? 0) > 0) ? [...COMPONENTS, SIDE_COMPONENT] : [...COMPONENTS];
+  const valueOf = (d: DayRow, k: ComponentKey | 'side') => (k === 'side' ? d.costParts.side ?? 0 : mode === 'cost' ? d.costParts[k] : d[k]);
   const fmt = mode === 'cost' ? fmtUSD : fmtTokens;
   chart.setOption({
     ...b,
@@ -133,14 +181,14 @@ export function dailyChart(
         const total = mode === 'cost' ? d.cost : d.input + d.cacheWrite + d.cacheRead + d.output;
         return (
           `<div style="font-weight:600;margin-bottom:4px">${fmtDay(d.day)} · ${fmt(total)}</div>` +
-          [...COMPONENTS].reverse().map((c) => row(series(c.slot), c.label, fmt(valueOf(d, c.key)))).join('') +
+          [...comps].reverse().map((c) => row(series(c.slot), c.label, fmt(valueOf(d, c.key)))).join('') +
           `<div style="color:${cssVar('--text-muted')};margin-top:4px">${d.sessions} sessions · ${d.requests} requests · click to open</div>`
         );
       },
     },
     xAxis: { type: 'category', data: days.map((d) => d.day), ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: string) => fmtDay(v).replace(/^\w+, /, '') } },
     yAxis: { type: 'value', ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmt(v) } },
-    series: COMPONENTS.map((c, i) => ({
+    series: comps.map((c, i) => ({
       name: c.label,
       type: 'bar',
       stack: 'x',
@@ -150,7 +198,7 @@ export function dailyChart(
         color: series(c.slot),
         borderColor: surface,
         borderWidth: 1,
-        borderRadius: i === COMPONENTS.length - 1 ? [4, 4, 0, 0] : 0,
+        borderRadius: i === comps.length - 1 ? [4, 4, 0, 0] : 0,
       },
       emphasis: { focus: 'none', itemStyle: { opacity: 0.85 } },
     })),
@@ -239,7 +287,7 @@ export function contextChart(el: HTMLElement, reqs: RequestRow[], onReq: (id: st
       },
     },
     xAxis: { type: 'category', data: x, ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (_: string, i: number) => String(i + 1) } },
-    yAxis: { type: 'value', max: (v: { max: number }) => Math.max(v.max, peak * 1.1), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtTokens(v) } },
+    yAxis: { type: 'value', max: (v: { max: number }) => niceCeil(Math.max(v.max, peak * 1.04)), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtTokens(v) } },
     series: s,
   });
   if (selected) {
@@ -274,7 +322,7 @@ export function costChart(el: HTMLElement, reqs: RequestRow[], onReq: (id: strin
         const r = all[ps[0].dataIndex];
         return (
           `<div style="font-weight:600;margin-bottom:4px">#${ps[0].dataIndex + 1} · ${fmtTime(r.ts)} · ${fmtUSD(r.cost)}</div>` +
-          [...COMPONENTS].reverse().map((c) => row(series(c.slot), c.label, fmtUSD(r.costParts[c.key as keyof CostParts]))).join('')
+          [...COMPONENTS].reverse().map((c) => row(series(c.slot), c.label, fmtUSD(r.costParts[c.key as keyof CostParts] ?? 0))).join('')
         );
       },
     },
@@ -285,7 +333,7 @@ export function costChart(el: HTMLElement, reqs: RequestRow[], onReq: (id: strin
       type: 'bar',
       stack: 'c',
       barMaxWidth: 24,
-      data: all.map((r) => r.costParts[c.key as keyof CostParts]),
+      data: all.map((r) => r.costParts[c.key as keyof CostParts] ?? 0),
       itemStyle: { color: series(c.slot), borderColor: surface, borderWidth: all.length > 150 ? 0 : 1, borderRadius: i === COMPONENTS.length - 1 ? [4, 4, 0, 0] : 0 },
     })),
   });
@@ -359,4 +407,582 @@ export function contextTreemap(el: HTMLElement, items: ContextItem[], onItem: (i
     if (it) onItem(it);
   });
   return chart;
+}
+
+/* ---------- 3c. context composition over time ---------- */
+
+export function compositionChart(el: HTMLElement, points: CompositionPoint[], mode: 'tokens' | 'share', onReq: (id: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  const catTotals = (p: CompositionPoint) =>
+    CATEGORIES.map((c) => (c.kinds as readonly ItemKind[]).reduce((a, k) => a + (p.byKind[k] ?? 0), 0));
+  const rows = points.map(catTotals);
+  const present = CATEGORIES.map((_, ci) => rows.some((r) => r[ci] > 0));
+  const value = (r: number[], ci: number, total: number) => (mode === 'share' ? (total ? (r[ci] / total) * 100 : 0) : r[ci]);
+  const fmt = (v: number) => (mode === 'share' ? `${v.toFixed(v < 10 ? 1 : 0)}%` : fmtTokens(v));
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
+      formatter: (all: { dataIndex: number; seriesType?: string }[]) => {
+        const ps = all.filter((x) => x.seriesType !== 'custom');
+        if (!ps.length) return '';
+        const i = ps[0].dataIndex;
+        const p = points[i];
+        const r = rows[i];
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(p.ts)} · ${fmtTokens(p.total)} in context</div>` +
+          CATEGORIES.map((c, ci) => ({ c, ci }))
+            .filter(({ ci }) => present[ci])
+            .reverse()
+            .map(({ c, ci }) => row(categoryColor(c), c.label, `${fmtTokens(r[ci])} · ${p.total ? ((r[ci] / p.total) * 100).toFixed(1) : 0}%`))
+            .join('') +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">click to open this request</div>`
+        );
+      },
+    },
+    xAxis: { type: 'category', boundaryGap: false, data: points.map((p) => p.id), ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (_: string, i: number) => String(i + 1) } },
+    yAxis: {
+      type: 'value',
+      max: mode === 'share' ? 100 : undefined,
+      ...b.axisCommon,
+      axisLine: { show: false },
+      axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmt(v) },
+    },
+    series: CATEGORIES.map((c, ci) => ({ c, ci }))
+      .filter(({ ci }) => present[ci])
+      .map(({ c, ci }) => ({
+        name: c.label,
+        type: 'line',
+        stack: 'ctx',
+        symbol: 'none',
+        lineStyle: { width: 1, color: surface },
+        areaStyle: { color: categoryColor(c), opacity: 0.9 },
+        emphasis: { disabled: true },
+        data: rows.map((r, i) => value(r, ci, points[i].total)),
+      })),
+  });
+  chart.getZr().on('click', (e) => {
+    const idx = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    const i = idx?.[0];
+    if (i != null && points[i]) onReq(points[i].id);
+  });
+  return chart;
+}
+
+/* ---------- dashboard view: spend by product/model/… per UTC day or week ---------- */
+
+/** Series colours for the dashboard view: products keep fixed slots; other groupings go by stable order. */
+export function usageColors(view: UsageView): string[] {
+  const PRODUCT_SLOT: Record<string, number> = { claude_code: 1, chat: 2, cowork: 3, chrome: 4 };
+  if (view.group === 'role') return view.series.map((s) => roleColor(s.key as RequestRole));
+  return view.series.map((s, i) => (view.group === 'product' ? series(PRODUCT_SLOT[s.key] ?? 8) : i < 8 ? series(i + 1) : cssVar('--other')));
+}
+
+export function usageChart(el: HTMLElement, view: UsageView, onBucket: (bucket: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  const colors = usageColors(view);
+  const shown = view.series.map((s, i) => ({ s, i })).filter(({ s }) => s.total > 0);
+  const top = shown.length - 1;
+  const refByBucket = view.buckets.map((bk, i) => {
+    if (view.interval === 'day') return view.reference.days[bk] ?? null;
+    const next = view.buckets[i + 1];
+    const vals = Object.entries(view.reference.days).filter(([d]) => d >= bk && (!next || d < next));
+    return vals.length ? vals.reduce((a, [, v]) => a + v, 0) : null;
+  });
+  const hasRef = refByBucket.some((v) => v != null);
+  const label = (bk: string) => {
+    const d = new Date(bk + 'T00:00:00Z');
+    const md = d.toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    return view.interval === 'week' ? `Week of ${md}` : md;
+  };
+  const seriesOpts: object[] = shown.map(({ s, i }, k) => ({
+    name: s.label,
+    type: 'bar',
+    stack: 'spend',
+    barMaxWidth: 24,
+    data: s.values,
+    itemStyle: { color: colors[i], borderColor: surface, borderWidth: 1, borderRadius: k === top ? [4, 4, 0, 0] : 0 },
+  }));
+  if (hasRef)
+    seriesOpts.push({
+      name: 'Dashboard (entered)',
+      type: 'line',
+      data: refByBucket,
+      connectNulls: false,
+      symbol: 'circle',
+      symbolSize: 8,
+      lineStyle: { width: 2, color: cssVar('--text-secondary') },
+      itemStyle: { color: cssVar('--text-secondary'), borderColor: surface, borderWidth: 2 },
+      z: 5,
+    });
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 8, top: 16, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'shadow', shadowStyle: { color: cssVar('--wash') } },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        const tot = shown.reduce((a, { s }) => a + s.values[i], 0);
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">${label(view.buckets[i])} (UTC) · ${fmtUSD(tot)}</div>` +
+          [...shown].reverse().map(({ s, i: si }) => row(colors[si], s.label, fmtUSD(s.values[i]))).join('') +
+          (refByBucket[i] != null ? row(cssVar('--text-secondary'), 'Dashboard (entered)', fmtUSD(refByBucket[i]!)) : '')
+        );
+      },
+    },
+    xAxis: { type: 'category', data: view.buckets, ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: string) => label(v).replace('Week of ', '') } },
+    yAxis: { type: 'value', ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    series: seriesOpts,
+  });
+  chart.getZr().on('click', (e) => {
+    const idx = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    const i = idx?.[0];
+    if (i != null && view.buckets[i]) onBucket(view.buckets[i]);
+  });
+  return chart;
+}
+
+/* ---------- cost accumulated over time ---------- */
+
+type Part = ComponentKey | 'side';
+const PARTS: { key: Part; label: string; slot: number }[] = [...COMPONENTS, SIDE_COMPONENT];
+
+/**
+ * Running total of a session's cost, stacked by what it was paid for. By request (clickable, lines up
+ * with the other session charts) or by clock time (shows idle gaps and bursts).
+ */
+/**
+ * Spend accumulated day by day over the selected range, stacked by component, with the monthly limit or
+ * plan fee as a reference line and the current pace carried to the end of the billing period.
+ */
+export function rangeAccumulationChart(
+  el: HTMLElement,
+  days: DayRow[],
+  opts: { from: string; to: string; reference?: { value: number; label: string }; projectTo?: string },
+  onDay: (day: string) => void,
+) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  // Every calendar day in range, so idle days are flat steps rather than skipped.
+  const byDay = new Map(days.map((d) => [d.day, d]));
+  const labels: string[] = [];
+  for (let t = new Date(opts.from + 'T12:00:00'); ; t.setDate(t.getDate() + 1)) {
+    const d = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    if (d > opts.to) break;
+    labels.push(d);
+  }
+  const value = (d: DayRow | undefined, k: Part) => (!d ? 0 : k === 'side' ? d.costParts.side ?? 0 : d.costParts[k] ?? 0);
+  const parts = PARTS.filter((p) => days.some((d) => value(d, p.key) > 0));
+  const running = parts.map(() => 0);
+  const rows = labels.map((d) => parts.map((p, i) => (running[i] += value(byDay.get(d), p.key))));
+  const totalAt = (i: number) => rows[i]?.reduce((a, v) => a + v, 0) ?? 0;
+  const endTotal = totalAt(labels.length - 1);
+  // Pace: the average day so far, carried forward to the end of the period.
+  let proj: (number | null)[] | undefined;
+  const allLabels = [...labels];
+  if (opts.projectTo && opts.projectTo > opts.to && labels.length) {
+    for (let t = new Date(opts.to + 'T12:00:00'); ; ) {
+      t.setDate(t.getDate() + 1);
+      const d = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+      if (d > opts.projectTo) break;
+      allLabels.push(d);
+    }
+    const perDay = endTotal / labels.length;
+    proj = allLabels.map((_, i) => (i < labels.length - 1 ? null : endTotal + perDay * (i - (labels.length - 1))));
+  }
+  const muted = cssVar('--text-secondary');
+  const seriesOpts: object[] = parts.map((p, k) => ({
+    name: p.label,
+    type: 'line',
+    stack: 'cum',
+    symbol: 'none',
+    lineStyle: { width: 1, color: surface },
+    areaStyle: { color: series(p.slot), opacity: 0.9 },
+    emphasis: { disabled: true },
+    data: allLabels.map((_, i) => (i < rows.length ? rows[i][k] : null)),
+  }));
+  if (proj)
+    seriesOpts.push({
+      name: 'On pace',
+      type: 'line',
+      symbol: 'none',
+      lineStyle: { width: 2, color: muted, opacity: 0.7 },
+      data: proj,
+      z: 4,
+    });
+  if (opts.reference) {
+    const crit = cssVar('--critical');
+    // A flat series rather than a markLine: its colour and label are applied reliably on every redraw.
+    seriesOpts.push({
+      name: opts.reference.label,
+      type: 'line',
+      symbol: 'none',
+      silent: true,
+      z: 3,
+      lineStyle: { width: 1, color: crit },
+      itemStyle: { color: crit },
+      data: allLabels.map(() => opts.reference!.value),
+      endLabel: { show: true, formatter: `${opts.reference.label} ${fmtUSD(opts.reference.value)}`, color: cssVar('--text-secondary'), fontSize: 11, offset: [-150, -10] },
+      tooltip: { show: false },
+    });
+  }
+  const peak = Math.max(endTotal, proj ? proj[proj.length - 1] ?? 0 : 0, opts.reference?.value ?? 0);
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 16, top: 20, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        if (i >= rows.length)
+          return `<div style="font-weight:600">${fmtDay(allLabels[i])}</div>` + row(muted, 'On pace', fmtUSD(proj?.[i] ?? 0));
+        const d = byDay.get(labels[i]);
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">${fmtDay(labels[i])} · ${fmtUSD(totalAt(i))} so far</div>` +
+          [...parts].map((p, k) => ({ p, v: rows[i][k] })).reverse().map(({ p, v }) => row(series(p.slot), p.label, fmtUSD(v))).join('') +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">${d ? `${fmtUSD(d.cost)} that day · click to open it` : 'no usage that day'}</div>`
+        );
+      },
+    },
+    xAxis: { type: 'category', boundaryGap: false, data: allLabels, ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: string) => fmtDay(v).replace(/^\w+, /, '') } },
+    yAxis: { type: 'value', max: (v: { max: number }) => niceCeil(Math.max(v.max, peak * 1.04)), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    series: seriesOpts,
+  });
+  chart.getZr().on('click', (e) => {
+    const pt = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    const i = pt?.[0];
+    if (i != null && labels[i] && byDay.has(labels[i])) onDay(labels[i]);
+  });
+  return { chart, total: endTotal, projected: proj ? proj[proj.length - 1] ?? endTotal : undefined };
+}
+
+/* ---------- session timeline: context composition over cost per request, one shared request axis ---------- */
+
+export interface TimelineOptions {
+  mode: 'tokens' | 'share';
+  /** 'typical' caps the cost axis so a few cache-rewrite spikes don't flatten every other bar. */
+  costScale: 'full' | 'typical';
+  /** Zoom window (percent of the thread) to restore, so live redraws keep where you were looking. */
+  zoom?: { start: number; end: number };
+  onZoom?: (z: { start: number; end: number }) => void;
+  /** 'kind': context by content kind, cost by token type. 'who': context by who put it there, cost by why the call happened. */
+  colorBy: 'kind' | 'who';
+  /** Cost of the subagents each request launched, drawn on top of that request's bar. */
+  launched?: Map<string, { cost: number; names: string[] }>;
+  /** Space requests evenly ('request') or place them at the time they ran ('time'). All panels follow. */
+  xMode: 'request' | 'time';
+  /**
+   * One entry per prompt on this thread: the requests it spans, the cost of the call your message
+   * started, and the cost of everything Claude did after it (iterations, answer, subagents).
+   */
+  prompts?: { n: number; first: string; last: string; ids: string[]; prompt: number; work: number; text: string }[];
+}
+
+/**
+ * Three panels, one x axis: what filled the context on each request (top), what that request cost
+ * (middle), and the cost accumulated so far (bottom). Same requests, same positions, one crosshair,
+ * one zoom. The plot areas share a fixed left edge so the panels line up exactly.
+ */
+export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs: RequestRow[], opts: TimelineOptions, onReq: (id: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  const byId = new Map(reqs.map((r) => [r.id, r]));
+  const ids = points.map((p) => p.id);
+  const pos = new Map(ids.map((id, i) => [id, i]));
+  const who = opts.colorBy === 'who';
+  const layers: { label: string; color: string }[] = who
+    ? ORIGINS.map((o) => ({ label: o.label, color: originColor(o.key) }))
+    : CATEGORIES.map((c) => ({ label: c.label, color: categoryColor(c) }));
+  const rows = points.map((p) =>
+    who ? ORIGINS.map((o) => p.byOrigin?.[o.key] ?? 0) : CATEGORIES.map((c) => (c.kinds as readonly ItemKind[]).reduce((a, k) => a + (p.byKind[k] ?? 0), 0)),
+  );
+  const present = layers.map((_, ci) => rows.some((r) => r[ci] > 0));
+  const ctxVal = (i: number, ci: number) => (opts.mode === 'share' ? (points[i].total ? (rows[i][ci] / points[i].total) * 100 : 0) : rows[i][ci]);
+  const partVal = (r: RequestRow | undefined, k: Part) => (!r ? 0 : k === 'side' ? r.side ?? 0 : r.costParts[k] ?? 0);
+  const parts = PARTS.filter((p) => ids.some((id) => partVal(byId.get(id), p.key) > 0));
+  const own = (id: string) => {
+    const r = byId.get(id);
+    return r ? r.cost + (r.side ?? 0) : 0;
+  };
+  const launchedCost = (id: string) => opts.launched?.get(id)?.cost ?? 0;
+  const roles = ROLES.filter((ro) => reqs.some((r) => r.role === ro.key));
+  const totals = ids.map((id) => own(id) + launchedCost(id));
+  // Typical scale: 1.5× the 95th percentile, so the everyday bars are readable; spikes are clipped, and listed.
+  const sorted = [...totals].sort((a, b) => a - b);
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
+  const cap = opts.costScale === 'typical' && sorted.length > 20 ? niceCeil(p95 * 1.5) : undefined;
+  const clipped = cap ? totals.map((t, i) => ({ t, i })).filter((x) => x.t > cap) : [];
+  const limit = Math.max(...points.map((p) => p.contextLimit), 0);
+  const peak = Math.max(...points.map((p) => p.total), 0);
+  const dense = ids.length > 150;
+  const byTime = opts.xMode === 'time';
+  // A value at request i, placed by position or by time.
+  const at = (i: number, v: number) => (byTime ? [points[i].ts, v] : v);
+  const fmtCtx = (v: number) => (opts.mode === 'share' ? `${v.toFixed(0)}%` : fmtTokens(v));
+
+  const ctxSeries = layers.map((c, ci) => ({ c, ci }))
+    .filter(({ ci }) => present[ci])
+    .map(({ c, ci }, k) => ({
+      name: c.label,
+      type: 'line',
+      stack: 'ctx',
+      xAxisIndex: 0,
+      yAxisIndex: 0,
+      symbol: 'none',
+      step: byTime ? 'end' : undefined,
+      lineStyle: { width: 1, color: surface },
+      areaStyle: { color: c.color, opacity: 0.9 },
+      emphasis: { disabled: true },
+      data: ids.map((_, i) => at(i, ctxVal(i, ci))),
+      markLine:
+        k === 0 && opts.mode === 'tokens' && limit && peak > limit * 0.25
+          ? { silent: true, symbol: 'none', lineStyle: { color: cssVar('--critical'), width: 1, type: 'solid' }, label: { formatter: `Context limit ${fmtTokens(limit)}`, color: cssVar('--text-secondary'), position: 'insideEndTop' }, data: [{ yAxis: limit }] }
+          : undefined,
+    }));
+  const bar = (name: string, color: string, values: number[]) => ({
+    name,
+    type: 'bar',
+    stack: 'cost',
+    xAxisIndex: 1,
+    yAxisIndex: 1,
+    barMaxWidth: 24,
+    ...(byTime ? { barWidth: 3 } : { barCategoryGap: dense ? '10%' : '30%' }),
+    values,
+    data: values.map((v, i) => at(i, v)),
+    itemStyle: { color, borderColor: surface, borderWidth: dense || byTime ? 0 : 1 },
+  });
+  const costSeries = who
+    ? roles.map((ro) => bar(ro.label, roleColor(ro.key), ids.map((id) => (byId.get(id)?.role === ro.key ? own(id) : 0))))
+    : parts.map((p) => bar(p.label, series(p.slot), ids.map((id) => partVal(byId.get(id), p.key))));
+  // Subagents launched from a main-thread request: their whole cost sits on top of the launching bar, hatched.
+  if (opts.launched?.size)
+    costSeries.push({
+      ...bar('Subagents launched', roleColor('subagent'), ids.map(launchedCost)),
+      itemStyle: { color: roleColor('subagent'), borderColor: surface, borderWidth: dense ? 0 : 1, opacity: 0.55 } as never,
+    });
+  const launchMarks = ids.flatMap((id, i) => (opts.launched?.has(id) ? [{ xAxis: i }] : []));
+  if (launchMarks.length && ctxSeries[0])
+    (ctxSeries[0] as Record<string, unknown>).markPoint = {
+      silent: true,
+      symbol: 'pin',
+      symbolSize: 18,
+      itemStyle: { color: roleColor('subagent') },
+      label: { show: false },
+      data: launchMarks.map((m) => ({ coord: [byTime ? points[m.xAxis].ts : ids[m.xAxis], opts.mode === 'share' ? 100 : points[m.xAxis].total] })),
+    };
+  // Bottom panel: the same components as the cost bars, summed as you go.
+  const cumSeries = costSeries.map((cs) => {
+    let run = 0;
+    return {
+      name: cs.name,
+      type: 'line',
+      stack: 'cum',
+      xAxisIndex: 3,
+      yAxisIndex: 3,
+      symbol: 'none',
+      step: byTime ? 'end' : undefined,
+      lineStyle: { width: 1, color: surface },
+      areaStyle: { color: (cs.itemStyle as { color: string }).color, opacity: 0.9 },
+      emphasis: { disabled: true },
+      data: cs.values.map((v, i) => at(i, (run += v))),
+    };
+  });
+  // Cost per prompt: one block per prompt, as wide as its requests and as tall as the whole package.
+  const promptOf = new Map<string, NonNullable<TimelineOptions['prompts']>[number]>();
+  const blocks = (opts.prompts ?? []).filter((pr) => pos.has(pr.first) && pos.has(pr.last));
+  for (const pr of blocks) for (const id of pr.ids) promptOf.set(id, pr);
+  const xOf = (id: string) => (byTime ? points[pos.get(id)!].ts : pos.get(id)!);
+  const blockSeries = (name: string, color: string, lo: (pr: (typeof blocks)[number]) => number, hi: (pr: (typeof blocks)[number]) => number) => ({
+    name,
+    type: 'custom',
+    xAxisIndex: 2,
+    yAxisIndex: 2,
+    encode: { x: [0, 1], y: [2, 3] },
+    tooltip: { show: false },
+    data: blocks.map((pr) => [xOf(pr.first), xOf(pr.last), lo(pr), hi(pr), pr.n]),
+    renderItem: (_: unknown, api: { value: (i: number) => number; coord: (v: number[]) => number[]; size: (v: number[]) => number[] }) => {
+      // Category axis: extend half a band each side so a block covers its first and last bar fully.
+      const half = byTime ? 1.5 : api.size([1, 0])[0] / 2;
+      const a = api.coord([api.value(0), api.value(2)]);
+      const z = api.coord([api.value(1), api.value(3)]);
+      const x = a[0] - half;
+      const w = Math.max(3, z[0] + half - x);
+      return { type: 'rect', shape: { x, y: z[1], width: w, height: a[1] - z[1] }, style: { fill: color, stroke: surface, lineWidth: 1 } };
+    },
+  });
+  const promptSeries = blocks.length
+    ? [
+        blockSeries('Your prompt call', roleColor('prompt'), () => 0, (pr) => pr.prompt),
+        blockSeries('Claude’s work for it', roleColor('iteration'), (pr) => pr.prompt, (pr) => pr.prompt + pr.work),
+      ]
+    : [];
+  const cumTotals: number[] = [];
+  totals.reduce((a, t, i) => (cumTotals[i] = a + t), 0);
+
+  const last = 3;
+  // Sessions often span days: add the date once the thread runs longer than a day.
+  const multiDay = points.length > 1 && points[points.length - 1].ts - points[0].ts > 20 * 3600_000;
+  const timeLabel = (v: number) =>
+    multiDay
+      ? new Date(v).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
+      : fmtTime(v).replace(/:\d\d(\s|$)/, '$1');
+  const axisX = (i: number) =>
+    byTime
+      ? {
+          type: 'time',
+          gridIndex: i,
+          ...b.axisCommon,
+          splitLine: { show: false },
+          axisLabel: i === last ? { ...b.axisCommon.axisLabel, formatter: timeLabel, hideOverlap: true } : { show: false },
+          axisTick: { show: false },
+        }
+      : {
+          type: 'category',
+          gridIndex: i,
+          data: ids,
+          boundaryGap: true,
+          ...b.axisCommon,
+          splitLine: { show: false },
+          // Label by the request's real position (the formatter's own index restarts inside a zoomed window).
+          axisLabel: i === last ? { ...b.axisCommon.axisLabel, formatter: (id: string) => String((pos.get(id) ?? 0) + 1) } : { show: false },
+          axisTick: { show: false },
+        };
+  // Fixed plot edges (no containLabel): each panel's y labels differ in width, which would shift its plot.
+  const LEFT = 64;
+  const RIGHT = 16;
+  // Each panel gets its own title, set just above its plot.
+  const panelTitle = (text: string, sub: string, top: number | string) => ({
+    text,
+    subtext: sub,
+    left: 0,
+    top,
+    itemGap: 4,
+    textStyle: { color: cssVar('--text-primary'), fontSize: 13, fontWeight: 600 },
+    subtextStyle: { color: cssVar('--text-muted'), fontSize: 11 },
+  });
+  chart.setOption({
+    ...b,
+    axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: cssVar('--axis') } },
+    title: [
+      panelTitle('What filled the context', opts.mode === 'share' ? 'Share of the context on each request' : 'Tokens in the context on each request', 0),
+      panelTitle('Cost per request', cap ? `Axis capped at ${fmtUSD(cap)}; hover shows the real value` : 'What each request cost', '36%'),
+      panelTitle(
+        'Cost per prompt',
+        blocks.length ? 'Each block is one prompt: as wide as its requests, as tall as the whole package (your call + Claude’s work)' : 'Prompts are shown on the main thread',
+        '56%',
+      ),
+      panelTitle('Cost accumulated over the session', `${fmtUSD(cumTotals[cumTotals.length - 1] ?? 0)} by the last request`, '76%'),
+    ],
+    grid: [
+      { left: LEFT, right: RIGHT, top: 48, height: '29%' },
+      { left: LEFT, right: RIGHT, top: '40.5%', height: '12.5%' },
+      { left: LEFT, right: RIGHT, top: '60.5%', height: '12.5%' },
+      { left: LEFT, right: RIGHT, top: '80.5%', bottom: 50 },
+    ],
+    xAxis: [axisX(0), axisX(1), axisX(2), axisX(3)],
+    yAxis: [
+      { type: 'value', gridIndex: 0, max: opts.mode === 'share' ? 100 : (v: { max: number }) => niceCeil(v.max * 1.04), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: fmtCtx } },
+      { type: 'value', gridIndex: 1, max: cap, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+      { type: 'value', gridIndex: 2, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+      { type: 'value', gridIndex: 3, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1, 2, 3], filterMode: 'weakFilter', start: opts.zoom?.start ?? 0, end: opts.zoom?.end ?? 100, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false },
+      {
+        type: 'slider',
+        xAxisIndex: [0, 1, 2, 3],
+        filterMode: 'weakFilter',
+        bottom: 6,
+        height: 18,
+        start: opts.zoom?.start ?? 0,
+        end: opts.zoom?.end ?? 100,
+        borderColor: cssVar('--border'),
+        fillerColor: cssVar('--wash'),
+        backgroundColor: 'transparent',
+        dataBackground: { lineStyle: { color: cssVar('--axis') }, areaStyle: { color: cssVar('--surface-2') } },
+        textStyle: { color: cssVar('--text-muted'), fontSize: 11 },
+        labelFormatter: (v: number) => (byTime ? timeLabel(v) : `#${Math.round(v) + 1}`),
+      },
+    ],
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        const p = points[i];
+        const r = byId.get(ids[i]);
+        const ctxRows = layers.map((c, ci) => ({ c, ci }))
+          .filter(({ ci }) => present[ci] && rows[i][ci] > 0)
+          .reverse()
+          .map(({ c, ci }) => row(c.color, c.label, `${fmtTokens(rows[i][ci])} · ${p.total ? ((rows[i][ci] / p.total) * 100).toFixed(0) : 0}%`))
+          .join('');
+        const costRows = [...parts].reverse().map((pt) => row(series(pt.slot), pt.label, fmtUSD(partVal(r, pt.key)))).join('');
+        const l = opts.launched?.get(ids[i]);
+        const launchedRow = l ? row(roleColor('subagent'), `Subagents launched: ${esc(l.names.join(', '))}`, fmtUSD(l.cost)) : '';
+        const why = r ? roleOf(r.role) : undefined;
+        const whyText = r && why
+          ? r.role === 'iteration' && r.trigger?.length
+            ? `Claude iterating on ${esc(r.trigger.join(', '))} results`
+            : r.role === 'auto' && r.trigger?.length
+              ? `Automatic: ${esc(r.trigger.join(', '))}`
+              : why.label
+          : '';
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(p.ts)}${r ? ` · ${esc(r.model)}` : ''}</div>` +
+          (why ? `<div style="margin-bottom:4px"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${roleColor(r!.role)};margin-right:6px"></span>${whyText}</div>` : '') +
+          `<div style="color:${cssVar('--text-muted')};margin:2px 0">In context: <b style="color:${cssVar('--text-primary')}">${fmtTokens(p.total)}</b></div>` +
+          ctxRows +
+          `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Cost: <b style="color:${cssVar('--text-primary')}">${fmtUSD(totals[i])}</b>${cap && totals[i] > cap ? ' (clipped on the chart)' : ''}</div>` +
+          costRows +
+          launchedRow +
+          (() => {
+            const pr = promptOf.get(ids[i]);
+            if (!pr) return '';
+            return (
+              `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Prompt ${pr.n} package: <b style="color:${cssVar('--text-primary')}">${fmtUSD(pr.prompt + pr.work)}</b></div>` +
+              row(roleColor('prompt'), 'Your prompt call', fmtUSD(pr.prompt)) +
+              row(roleColor('iteration'), 'Claude’s work for it', fmtUSD(pr.work))
+            );
+          })() +
+          `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Accumulated so far: <b style="color:${cssVar('--text-primary')}">${fmtUSD(cumTotals[i])}</b></div>` +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">${esc(r?.tools.join(', ') || 'no tool calls')} · click to open</div>`
+        );
+      },
+    },
+    series: [...ctxSeries, ...costSeries.map(({ values: _v, ...rest }) => rest), ...promptSeries, ...cumSeries],
+  });
+  chart.on('datazoom', () => {
+    const dz = (chart.getOption() as { dataZoom?: { start: number; end: number }[] }).dataZoom?.[0];
+    if (dz && opts.onZoom) opts.onZoom({ start: dz.start, end: dz.end });
+  });
+  chart.getZr().on('click', (e) => {
+    // Only clicks inside the plot areas open a request (not the zoom slider).
+    const px = [e.offsetX, e.offsetY];
+    const g = [0, 1, 2, 3].find((k) => chart.containPixel({ gridIndex: k }, px));
+    if (g == null) return;
+    const pt = chart.convertFromPixel({ gridIndex: g }, px) as number[] | undefined;
+    if (!pt) return;
+    let i: number;
+    if (byTime) {
+      // The request nearest in time to the click.
+      i = 0;
+      for (let k = 1; k < points.length; k++) if (Math.abs(points[k].ts - pt[0]) < Math.abs(points[i].ts - pt[0])) i = k;
+    } else i = Math.round(pt[0]);
+    if (ids[i]) onReq(ids[i]);
+  });
+  return { chart, clipped: clipped.map((x) => ({ n: x.i + 1, cost: x.t })), cap, total: cumTotals[cumTotals.length - 1] ?? 0 };
 }

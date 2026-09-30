@@ -1,7 +1,7 @@
 {
   "name": "session-lens",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drill-down explorer for Claude Code usage: day \u2192 session \u2192 request \u2192 context line items",
   "workspaces": [
     "packages/core",

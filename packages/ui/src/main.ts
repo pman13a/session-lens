@@ -1,6 +1,6 @@
 import './style.css';
 import { api, saveFile, subscribe, type AccountState, type BillingMode, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
-import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll, rangeAccumulationChart, sessionAccumulationChart, setAnimation, usageChart, usageColors } from './charts';
+import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextTreemap, cssVar, dailyChart, disposeAll, rangeAccumulationChart, sessionAccumulationChart, timelineChart, setAnimation, usageChart, usageColors } from './charts';
 import { daysAgo, isoDay, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
 /* ---------- tiny DOM helper: text always goes in as textContent ---------- */
@@ -814,19 +814,42 @@ function accumulationCard(reqs: RequestRow[], open: (id: string) => void): Node 
   return el;
 }
 
-function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id: string) => void): Node {
-  const chartEl = h('div', { class: 'chart tall' });
+const timelineZoom = new Map<string, { start: number; end: number }>();
+
+/**
+ * One card, two panels on the same request axis: what filled the context (top) and what each request
+ * cost (bottom). Thread, scale and zoom apply to both, and survive live redraws.
+ */
+function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: SessionDetail, open: (id: string) => void): Node {
+  const chartEl = h('div', { class: 'chart', style: { height: '620px' } });
   let thread = compThread.get(d.session.id) ?? '';
   let mode = store.get('compMode', 'tokens') as 'tokens' | 'share';
+  let costScale = store.get('costScale', 'typical') as 'full' | 'typical';
   const legendHolder = h('div');
+  const note = h('div', { class: 'muted', style: { fontSize: '12px', minHeight: '16px' } });
+  const zoomKey = () => `${d.session.id}:${thread}`;
   const draw = () => {
     const pts = points.filter((p) => (p.agentId ?? '') === thread);
+    const threadReqs = reqs.filter((r) => (r.agentId ?? '') === thread);
     const present = CATEGORIES.filter((c) => pts.some((p) => (c.kinds as readonly string[]).some((k) => (p.byKind as Record<string, number>)[k] > 0)));
-    legendHolder.replaceChildren(legend(present.map((c) => ({ label: c.label, color: categoryColor(c) }))));
+    const parts = [...COMPONENTS, SIDE_COMPONENT].filter((c) =>
+      threadReqs.some((r) => (c.key === 'side' ? r.side ?? 0 : (r.costParts as unknown as Record<string, number>)[c.key] ?? 0) > 0),
+    );
+    legendHolder.replaceChildren(
+      h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Context:'), ...present.map((c) => h('span', {}, h('i', { style: { background: categoryColor(c) } }), c.label))),
+      h('div', { class: 'legend' }, h('span', { class: 'muted' }, `${costWord()}:`), ...parts.map((c) => h('span', {}, h('i', { style: { background: cssVar(`--series-${c.slot}`) } }), c.label))),
+    );
     const old = (chartEl as unknown as { _chart?: { dispose(): void } })._chart;
     old?.dispose();
-    (chartEl as unknown as { _chart?: unknown })._chart = pts.length ? compositionChart(chartEl, pts, mode, open) : undefined;
-    if (!pts.length) chartEl.replaceChildren(h('div', { class: 'empty' }, 'No requests on this thread'));
+    if (!pts.length) {
+      chartEl.replaceChildren(h('div', { class: 'empty' }, 'No requests on this thread'));
+      return;
+    }
+    const res = timelineChart(chartEl, pts, threadReqs, { mode, costScale, zoom: timelineZoom.get(zoomKey()), onZoom: (z) => timelineZoom.set(zoomKey(), z) }, open);
+    (chartEl as unknown as { _chart?: unknown })._chart = res.chart;
+    note.textContent = res.cap && res.clipped.length
+      ? `Cost axis capped at ${fmtUSD(res.cap)} so everyday requests are readable. Above it: ${res.clipped.slice(0, 6).map((c) => `#${c.n} ${fmtUSD(c.cost)}`).join(', ')}${res.clipped.length > 6 ? ` and ${res.clipped.length - 6} more` : ''}. Hover shows the real value.`
+      : 'Drag the slider or ctrl-scroll to zoom both panels together.';
   };
   const modeSeg = seg(
     [
@@ -841,7 +864,21 @@ function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id
       draw();
     },
   );
-  const actions: Node[] = [modeSeg];
+  const scaleSeg = seg(
+    [
+      { key: 'typical', label: 'Typical' },
+      { key: 'full', label: 'Full scale' },
+    ],
+    costScale,
+    (k) => {
+      costScale = k;
+      store.set('costScale', k);
+      scaleSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'typical' : 'full') === k)));
+      draw();
+    },
+  );
+  scaleSeg.title = 'Cost axis: Typical caps rare spikes so everyday requests are readable';
+  const actions: Node[] = [modeSeg, scaleSeg];
   if (d.subagents.length)
     actions.unshift(
       h(
@@ -858,7 +895,14 @@ function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id
         ...d.subagents.map((a) => h('option', { value: a.agentId, selected: a.agentId === thread ? 'selected' : null }, `Subagent: ${a.agentType ?? 'agent'} · ${a.description ?? a.agentId}`)),
       ),
     );
-  const el = card('What filled the context over time', 'Each request’s context split by kind. Click a point to open that request.', actions, legendHolder, chartEl);
+  const el = card(
+    'What filled the context, and what each request cost',
+    'Top: the context on each request, split by kind. Bottom: that request’s cost. Same requests, same axis. Click to open one.',
+    actions,
+    legendHolder,
+    chartEl,
+    note,
+  );
   queueMicrotask(draw);
   return el;
 }
@@ -877,8 +921,6 @@ async function sessionView(token: number, id: string, day?: string) {
     (a, r) => ({ read: a.read + r.usage.cacheRead, write: a.write + r.usage.cacheWrite5m + r.usage.cacheWrite1h, input: a.input + r.usage.input, out: a.out + r.usage.output }),
     { read: 0, write: 0, input: 0, out: 0 },
   );
-  const ctxEl = h('div', { class: 'chart' });
-  const costEl = h('div', { class: 'chart' });
   const byId = new Map(reqs.map((r, i) => [r.id, { r, n: i + 1 }]));
   const reqCols: Col<RequestRow>[] = [
     { key: 'n', label: '#', num: true, cell: (r) => byId.get(r.id)!.n },
@@ -934,14 +976,8 @@ async function sessionView(token: number, id: string, day?: string) {
       tile('Peak context', peak ? fmtTokens(peak.contextTokens) : '—', peak ? `${fmtPct(peak.contextTokens / peak.contextLimit)} of ${fmtTokens(peak.contextLimit)}` : ''),
       tile('Cache read / write', `${fmtTokens(u.read)} / ${fmtTokens(u.write)}`, `${fmtTokens(u.out)} output`),
     ),
-    compositionCard(comp.points, d, open),
+    timelineCard(comp.points, reqs, d, open),
     accumulationCard(reqs, open),
-    h(
-      'div',
-      { class: 'grid2' },
-      card('Context size per request', 'Tokens the model saw on each call. Click a point to break it down.', [], legend([{ label: 'Main thread', color: cssVar('--series-1') }, ...(d.subagents.length ? [{ label: 'Subagents', color: cssVar('--series-2') }] : [])]), ctxEl),
-      card(`${costWord()} per request`, 'Stacked by token type. Click a bar to break it down.', [], legend(COMPONENTS.map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))), costEl),
-    ),
     card(
       'Prompts',
       'Each prompt with the requests that answered it (subagent work is grouped under the prompt that launched it)',
@@ -972,8 +1008,6 @@ async function sessionView(token: number, id: string, day?: string) {
       ),
     );
   swap(...kids);
-  contextChart(ctxEl, reqs, open);
-  costChart(costEl, reqs, open);
 }
 
 /* ---------- level 4: one request's context ---------- */

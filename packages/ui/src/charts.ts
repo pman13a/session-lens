@@ -1,11 +1,11 @@
 import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
-import { DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
+import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, RequestRow, UsageView } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
-echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent, CanvasRenderer]);
+echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
 
 /* ---------- theme from CSS custom properties ---------- */
 
@@ -692,4 +692,158 @@ export function rangeAccumulationChart(
     if (i != null && labels[i] && byDay.has(labels[i])) onDay(labels[i]);
   });
   return { chart, total: endTotal, projected: proj ? proj[proj.length - 1] ?? endTotal : undefined };
+}
+
+/* ---------- session timeline: context composition over cost per request, one shared request axis ---------- */
+
+export interface TimelineOptions {
+  mode: 'tokens' | 'share';
+  /** 'typical' caps the cost axis so a few cache-rewrite spikes don't flatten every other bar. */
+  costScale: 'full' | 'typical';
+  /** Zoom window (percent of the thread) to restore, so live redraws keep where you were looking. */
+  zoom?: { start: number; end: number };
+  onZoom?: (z: { start: number; end: number }) => void;
+}
+
+/**
+ * Two panels, one x axis: what filled the context on each request (top), and what that request cost
+ * (bottom). Same requests, same positions, one crosshair, one zoom.
+ */
+export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs: RequestRow[], opts: TimelineOptions, onReq: (id: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  const byId = new Map(reqs.map((r) => [r.id, r]));
+  const ids = points.map((p) => p.id);
+  const pos = new Map(ids.map((id, i) => [id, i]));
+  const rows = points.map((p) => CATEGORIES.map((c) => (c.kinds as readonly ItemKind[]).reduce((a, k) => a + (p.byKind[k] ?? 0), 0)));
+  const present = CATEGORIES.map((_, ci) => rows.some((r) => r[ci] > 0));
+  const ctxVal = (i: number, ci: number) => (opts.mode === 'share' ? (points[i].total ? (rows[i][ci] / points[i].total) * 100 : 0) : rows[i][ci]);
+  const partVal = (r: RequestRow | undefined, k: Part) => (!r ? 0 : k === 'side' ? r.side ?? 0 : r.costParts[k] ?? 0);
+  const parts = PARTS.filter((p) => ids.some((id) => partVal(byId.get(id), p.key) > 0));
+  const totals = ids.map((id) => {
+    const r = byId.get(id);
+    return r ? r.cost + (r.side ?? 0) : 0;
+  });
+  // Typical scale: 1.5× the 95th percentile, so the everyday bars are readable; spikes are clipped, and listed.
+  const sorted = [...totals].sort((a, b) => a - b);
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
+  const cap = opts.costScale === 'typical' && sorted.length > 20 ? niceCeil(p95 * 1.5) : undefined;
+  const clipped = cap ? totals.map((t, i) => ({ t, i })).filter((x) => x.t > cap) : [];
+  const limit = Math.max(...points.map((p) => p.contextLimit), 0);
+  const peak = Math.max(...points.map((p) => p.total), 0);
+  const dense = ids.length > 150;
+  const fmtCtx = (v: number) => (opts.mode === 'share' ? `${v.toFixed(0)}%` : fmtTokens(v));
+
+  const ctxSeries = CATEGORIES.map((c, ci) => ({ c, ci }))
+    .filter(({ ci }) => present[ci])
+    .map(({ c, ci }, k) => ({
+      name: c.label,
+      type: 'line',
+      stack: 'ctx',
+      xAxisIndex: 0,
+      yAxisIndex: 0,
+      symbol: 'none',
+      lineStyle: { width: 1, color: surface },
+      areaStyle: { color: categoryColor(c), opacity: 0.9 },
+      emphasis: { disabled: true },
+      data: ids.map((_, i) => ctxVal(i, ci)),
+      markLine:
+        k === 0 && opts.mode === 'tokens' && limit && peak > limit * 0.25
+          ? { silent: true, symbol: 'none', lineStyle: { color: cssVar('--critical'), width: 1, type: 'solid' }, label: { formatter: `Context limit ${fmtTokens(limit)}`, color: cssVar('--text-secondary'), position: 'insideEndTop' }, data: [{ yAxis: limit }] }
+          : undefined,
+    }));
+  const costSeries = parts.map((p, k) => ({
+    name: p.label,
+    type: 'bar',
+    stack: 'cost',
+    xAxisIndex: 1,
+    yAxisIndex: 1,
+    barMaxWidth: 24,
+    barCategoryGap: dense ? '10%' : '30%',
+    data: ids.map((id) => partVal(byId.get(id), p.key)),
+    itemStyle: { color: series(p.slot), borderColor: surface, borderWidth: dense ? 0 : 1, borderRadius: k === parts.length - 1 ? [3, 3, 0, 0] : 0 },
+  }));
+
+  const axisX = (i: number) => ({
+    type: 'category',
+    gridIndex: i,
+    data: ids,
+    boundaryGap: true,
+    ...b.axisCommon,
+    splitLine: { show: false },
+    // Label by the request's real position (the formatter's own index restarts inside a zoomed window).
+    axisLabel: i === 0 ? { show: false } : { ...b.axisCommon.axisLabel, formatter: (id: string) => String((pos.get(id) ?? 0) + 1) },
+    axisTick: { show: false },
+  });
+  chart.setOption({
+    ...b,
+    axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: cssVar('--axis') } },
+    grid: [
+      { left: 8, right: 16, top: 12, height: '52%', containLabel: true },
+      { left: 8, right: 16, top: '63%', bottom: 44, containLabel: true },
+    ],
+    xAxis: [axisX(0), axisX(1)],
+    yAxis: [
+      { type: 'value', gridIndex: 0, max: opts.mode === 'share' ? 100 : (v: { max: number }) => niceCeil(v.max * 1.04), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: fmtCtx } },
+      { type: 'value', gridIndex: 1, max: cap, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: opts.zoom?.start ?? 0, end: opts.zoom?.end ?? 100, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false },
+      {
+        type: 'slider',
+        xAxisIndex: [0, 1],
+        bottom: 6,
+        height: 18,
+        start: opts.zoom?.start ?? 0,
+        end: opts.zoom?.end ?? 100,
+        borderColor: cssVar('--border'),
+        fillerColor: cssVar('--wash'),
+        backgroundColor: 'transparent',
+        dataBackground: { lineStyle: { color: cssVar('--axis') }, areaStyle: { color: cssVar('--surface-2') } },
+        textStyle: { color: cssVar('--text-muted'), fontSize: 11 },
+        labelFormatter: (v: number) => `#${Math.round(v) + 1}`,
+      },
+    ],
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        const p = points[i];
+        const r = byId.get(ids[i]);
+        const ctxRows = CATEGORIES.map((c, ci) => ({ c, ci }))
+          .filter(({ ci }) => present[ci] && rows[i][ci] > 0)
+          .reverse()
+          .map(({ c, ci }) => row(categoryColor(c), c.label, `${fmtTokens(rows[i][ci])} · ${p.total ? ((rows[i][ci] / p.total) * 100).toFixed(0) : 0}%`))
+          .join('');
+        const costRows = [...parts].reverse().map((pt) => row(series(pt.slot), pt.label, fmtUSD(partVal(r, pt.key)))).join('');
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(p.ts)}${r ? ` · ${esc(r.model)}` : ''}</div>` +
+          `<div style="color:${cssVar('--text-muted')};margin:2px 0">In context: <b style="color:${cssVar('--text-primary')}">${fmtTokens(p.total)}</b></div>` +
+          ctxRows +
+          `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Cost: <b style="color:${cssVar('--text-primary')}">${fmtUSD(totals[i])}</b>${cap && totals[i] > cap ? ' (clipped on the chart)' : ''}</div>` +
+          costRows +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">${esc(r?.tools.join(', ') || 'no tool calls')} · click to open</div>`
+        );
+      },
+    },
+    series: [...ctxSeries, ...costSeries],
+  });
+  chart.on('datazoom', () => {
+    const dz = (chart.getOption() as { dataZoom?: { start: number; end: number }[] }).dataZoom?.[0];
+    if (dz && opts.onZoom) opts.onZoom({ start: dz.start, end: dz.end });
+  });
+  chart.getZr().on('click', (e) => {
+    // Only clicks inside the two plot areas open a request (not the zoom slider).
+    const px = [e.offsetX, e.offsetY];
+    const inTop = chart.containPixel({ gridIndex: 0 }, px);
+    const inBottom = chart.containPixel({ gridIndex: 1 }, px);
+    if (!inTop && !inBottom) return;
+    const pt = chart.convertFromPixel({ gridIndex: inBottom ? 1 : 0 }, px) as number[] | undefined;
+    const i = pt ? Math.round(pt[0]) : undefined;
+    if (i != null && ids[i]) onReq(ids[i]);
+  });
+  return { chart, clipped: clipped.map((x) => ({ n: x.i + 1, cost: x.t })), cap };
 }

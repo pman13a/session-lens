@@ -302,7 +302,7 @@ export class Api {
   /** A turn = one human prompt and every request (main + subagent) that answered it. */
   private turns(s: Session, reqs: Request[]) {
     const file = s.mainFile;
-    const prompts = new Map<string, { text: string; full: string; ts: number }>();
+    const prompts = new Map<string, { text: string; full: string; ts: number; mode?: string }>();
     if (file) {
       const f = this.store.files.get(file);
       for (const r of f?.records ?? []) {
@@ -319,7 +319,7 @@ export class Api {
           }
           const CAP = 8000;
           if (full.length > CAP) full = full.slice(0, CAP) + `\n… (${full.length - CAP} more characters)`;
-          prompts.set(r.promptId, { text: texts[0].label, full, ts: r.ts });
+          prompts.set(r.promptId, { text: texts[0].label, full, ts: r.ts, mode: r.permissionMode });
         }
       }
     }
@@ -344,6 +344,10 @@ export class Api {
         promptId,
         text: prompts.get(promptId)?.text ?? (promptId === 'unknown' ? '(no prompt found)' : '(prompt not in this file)'),
         fullText: prompts.get(promptId)?.full,
+        mode: prompts.get(promptId)?.mode,
+        // Models that answered, most-used first; subagent models listed separately.
+        models: byCount(rs.filter((r) => !r.agentId).map((r) => shortModel(r.model))),
+        subagentModels: byCount(rs.filter((r) => r.agentId).map((r) => shortModel(r.model))),
         ts: prompts.get(promptId)?.ts ?? rs[0].ts,
         requestIds: rs.map((r) => r.id),
         cost: sum(rs, (r) => r.cost + r.side),
@@ -593,6 +597,13 @@ export class Api {
         return { error: `unknown endpoint ${path}` };
     }
   }
+}
+
+/** Distinct values, most frequent first. */
+function byCount(xs: string[]): string[] {
+  const n = new Map<string, number>();
+  for (const x of xs) n.set(x, (n.get(x) ?? 0) + 1);
+  return [...n.entries()].sort((a, b) => b[1] - a[1]).map(([x]) => x);
 }
 
 function sum<T>(xs: T[], f: (x: T) => number) {

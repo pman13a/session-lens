@@ -257,6 +257,7 @@ export class TranscriptParser {
       rec.isMeta = !!d.isMeta;
       rec.isHuman = d.origin?.kind === 'human' || d.turnOrigin === 'human';
       if (typeof d.origin?.kind === 'string') rec.origin = d.origin.kind;
+      if (typeof d.permissionMode === 'string') rec.permissionMode = d.permissionMode;
       rec.pieces = userPieces(d, this.toolNames);
       if (!this.firstPrompt && rec.isHuman && !rec.isMeta) {
         this.firstPrompt = textOf(d.message?.content);

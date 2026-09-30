@@ -1009,6 +1009,11 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   return el;
 }
 
+/** Claude Code's permission modes, as the app names them. */
+function modeLabel(m: string): string {
+  return ({ default: 'default', plan: 'plan', acceptEdits: 'accept edits', auto: 'auto', bypassPermissions: 'bypass', dontAsk: 'don’t ask' } as Record<string, string>)[m] ?? m;
+}
+
 /**
  * Split each prompt's cost: the call your message started, and everything Claude did after it for that
  * prompt (iterations, the final answer, subagents). Together they are the prompt's whole package.
@@ -1132,22 +1137,28 @@ async function sessionView(token: number, id: string, day?: string) {
       h(
         'summary',
         {},
-        h('span', { class: 'prompt-no', title: `Your ${i + 1}${['th', 'st', 'nd', 'rd'][(i + 1) % 100 > 10 && (i + 1) % 100 < 14 ? 0 : Math.min((i + 1) % 10, 4) % 4] ?? 'th'} prompt in this session` }, `Prompt ${i + 1}`),
+        h('span', { class: 'prompt-no', title: `Prompt ${i + 1}: your message number ${i + 1} in this session` }, String(i + 1)),
         h('span', { class: 'req-count', title: `${t.requestIds.length} requests made for this prompt, subagents included` }, String(t.requestIds.length)),
         // Hover shows the whole prompt in a popover (pointer can move into it to scroll a long one).
         h('span', { class: 'prompt' }, h('span', { class: 't' }, t.text), h('div', { class: 'prompt-full', role: 'tooltip', onclick: (e: Event) => e.preventDefault() }, t.fullText ?? t.text)),
+        h('span', { class: 'tag mode' + (t.mode === 'plan' ? ' plan' : ''), title: t.mode ? `Permission mode when you sent this prompt: ${modeLabel(t.mode)}` : 'Mode not recorded (older Claude Code)' }, t.mode ? modeLabel(t.mode) : '—'),
+        h(
+          'span',
+          { class: 'tag model', title: `Model: ${t.models.join(', ') || '—'}${t.subagentModels.length ? ` · subagents: ${t.subagentModels.join(', ')}` : ''}` },
+          (t.models[0] ?? t.subagentModels[0] ?? '—') + (t.models.length + t.subagentModels.filter((m) => !t.models.includes(m)).length > 1 ? ' +' : ''),
+        ),
         (() => {
           // Where this prompt sits on the timeline: its first and last main-thread request numbers.
           const nums = t.requestIds.map((id) => reqNo.get(id)).filter((x): x is string => !!x && !x.startsWith('S')).map(Number);
-          const range = nums.length ? (Math.min(...nums) === Math.max(...nums) ? `#${nums[0]}` : `#${Math.min(...nums)}–${Math.max(...nums)}`) : '';
+          const range = nums.length ? (Math.min(...nums) === Math.max(...nums) ? `${nums[0]}` : `${Math.min(...nums)}–${Math.max(...nums)}`) : '—';
           const subs = t.requestIds.length - nums.length;
           return h(
             'span',
             { class: 'muted req-range', title: 'Request numbers on the timeline (main thread)' + (subs ? `, plus ${subs} subagent requests` : '') },
-            range ? `${range.includes('–') ? 'requests' : 'request'} ${range}` : '',
+            range,
           );
         })(),
-        h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
+        h('span', { class: 'who' }, roleSplitBar(t.byRole, { compact: true })),
         pkgs[i].hasPrompt
           ? h('b', { class: 'heat', style: { background: heat(pkgs[i].prompt) }, title: `Your prompt call: ${fmtUSD(pkgs[i].prompt)}. Colored against the other prompt calls in this session.` }, fmtUSD(pkgs[i].prompt))
           : h('span', { class: 'heat-empty', title: 'No call from your message in this group' }, '—'),
@@ -1175,9 +1186,10 @@ async function sessionView(token: number, id: string, day?: string) {
       })(),
     );
   let promptView = store.get('promptView', 'order') as 'order' | 'top';
+  let modeFilter = store.get('promptMode', '');
   const turnsHolder = h('div');
   const drawTurns = () => {
-    const list = d.turns.map((t, i) => ({ t, i }));
+    const list = d.turns.map((t, i) => ({ t, i })).filter(({ t }) => !modeFilter || (modeFilter === 'not-plan' ? t.mode !== 'plan' : t.mode === modeFilter));
     const shown = promptView === 'top' ? [...list].sort((a, b) => b.t.cost - a.t.cost).slice(0, 10) : list;
     turnsHolder.replaceChildren(...shown.map(({ t, i }) => turnEl(t, i)));
   };
@@ -1195,9 +1207,33 @@ async function sessionView(token: number, id: string, day?: string) {
       drawTurns();
     },
   );
+  const modes = [...new Set(d.turns.map((t) => t.mode).filter((m): m is string => !!m))];
+  const modeSel = h(
+    'select',
+    {
+      'aria-label': 'Filter prompts by mode',
+      onchange: (e: Event) => {
+        modeFilter = (e.target as HTMLSelectElement).value;
+        store.set('promptMode', modeFilter);
+        drawTurns();
+      },
+    },
+    h('option', { value: '' }, 'All modes'),
+    ...(modes.includes('plan') ? [h('option', { value: 'plan', selected: modeFilter === 'plan' ? 'selected' : null }, 'Plan mode only'), h('option', { value: 'not-plan', selected: modeFilter === 'not-plan' ? 'selected' : null }, 'Everything but plan')] : []),
+    ...modes.filter((m) => m !== 'plan').map((m) => h('option', { value: m, selected: modeFilter === m ? 'selected' : null }, `${modeLabel(m)} only`)),
+  );
+  // One header row: every column's title here, only values on the lines.
   const colHead = h(
     'div',
     { class: 'turn-head' },
+    h('span', {}),
+    h('span', { title: 'Prompt number: your message number in this session' }, '#'),
+    h('span', { title: 'Requests made for this prompt, subagents included' }, 'Req'),
+    h('span', { class: 'left', title: 'Hover a prompt to read all of it' }, 'Prompt'),
+    h('span', { title: 'Permission mode when you sent it' }, 'Mode'),
+    h('span', { title: 'Model that answered (+ means more than one)' }, 'Model'),
+    h('span', { title: 'Where it sits on the timeline: its first and last request numbers (main thread)' }, 'Requests #'),
+    h('span', { class: 'left', title: 'Cost split by who made the calls' }, 'Who'),
     h('span', { title: 'The call your message started' }, 'Your prompt'),
     h('span', { title: 'Everything Claude did after it for that prompt: iterations, the final answer, subagents' }, 'Claude’s work'),
     h('span', { title: 'Your prompt + Claude’s work' }, 'Total'),
@@ -1239,14 +1275,14 @@ async function sessionView(token: number, id: string, day?: string) {
       'Prompts',
       'Each prompt with the requests that answered it (subagent work is grouped under the prompt that launched it). The bar splits each prompt’s cost by who made the calls.',
       [
+        modeSel,
         promptSeg,
         ...exportButtons(`session-${s.id.slice(0, 8)}-requests`, () =>
           reqs.map((r, i) => ({ n: i + 1, id: r.id, time: new Date(r.ts).toISOString(), thread: r.agentId ?? 'main', role: r.role, trigger: (r.trigger ?? []).join(' '), model: r.model, tools: r.tools.join(' '), contextTokens: r.contextTokens, ...r.usage, cost: r.cost })),
         ),
       ],
       heatKey,
-      colHead,
-      turnsHolder,
+      h('div', { class: 'turns-grid' }, colHead, turnsHolder),
     ),
   ];
   if (d.subagents.length)

@@ -161,7 +161,15 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 
 .turn { border-top: 1px solid var(--grid); padding: 8px 0; }
 .turn:first-child { border-top: 0; }
-.turn summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; list-style: none; }
+/* Prompt rows and their header share one grid, so every value sits under its column title. */
+.turns-grid { --turn-cols: 12px 30px 40px minmax(0, 1fr) 64px 84px 76px 110px 76px 84px 72px; }
+.turn summary { cursor: pointer; display: grid; grid-template-columns: var(--turn-cols); column-gap: 10px; align-items: center; list-style: none; }
+.turn summary .who { display: block; }
+.turn summary .prompt-no { text-align: right; min-width: 0 !important; }
+.turn summary .req-count { justify-self: center; }
+.turn summary .req-range { text-align: right; }
+.turn summary .heat, .turn summary .heat-empty, .turn summary .total { justify-self: end; }
+.turn summary .tag { justify-self: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .turn summary::-webkit-details-marker { display: none; }
 .turn summary .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .turn summary .prompt { flex: 1; min-width: 0; position: relative; display: flex; }
@@ -183,10 +191,17 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 /* Low-profile request count: small, outlined, muted, fixed width so the prompt text lines up. */
 .turn summary .req-count { flex: none; min-width: 34px; text-align: center; font-size: 11px; line-height: 16px; padding: 0 5px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .turn summary .req-range { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.turn summary .tag { flex: none; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--text-muted); white-space: nowrap; }
+.turn summary .tag.mode { min-width: 52px; text-align: center; }
+.turn summary .tag.model { min-width: 70px; text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Plan mode stands out; every other mode stays muted. */
+.turn summary .tag.mode.plan { color: #fff; background: var(--series-7); border-color: var(--series-7); font-weight: 600; }
 .turn summary .heat-empty { flex: none; min-width: 72px; text-align: right; color: var(--text-muted); }
 .turn summary .total { flex: none; min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
-.turn-head { display: flex; justify-content: flex-end; gap: 10px; padding: 6px 0 2px; font-size: 11px; color: var(--text-muted); }
-.turn-head span { min-width: 72px; text-align: right; }
+.turn-head { display: grid; grid-template-columns: var(--turn-cols); column-gap: 10px; padding: 6px 0 4px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--grid); }
+.turn-head span { text-align: right; white-space: nowrap; }
+.turn-head span:nth-child(3), .turn-head span:nth-child(5), .turn-head span:nth-child(6) { text-align: center; }
+.turn-head span.left { text-align: left; }
 .turn summary .heat { flex: none; min-width: 72px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-variant-numeric: tabular-nums; }
 
 .raw { position: fixed; right: 0; top: 0; bottom: 0; width: min(640px, 100vw); background: var(--surface-1); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12); display: flex; flex-direction: column; z-index: 20; }

@@ -67,6 +67,8 @@ export interface Rec {
   isHuman?: boolean;
   /** Who wrote a user record: human, task-notification, … (Claude Code's `origin.kind`). */
   origin?: string;
+  /** Permission mode the message was sent in: default, plan, acceptEdits, auto, bypassPermissions… */
+  permissionMode?: string;
   pieces: ContentPiece[];
 }
 

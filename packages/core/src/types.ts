@@ -166,8 +166,10 @@ export interface Settings {
   discount?: number;
   /** Per-model discounts by id prefix (longest wins), for contracts that price models differently. */
   modelDiscounts?: Record<string, number>;
-  /** Per-model overrides merged over pricing.json, keyed by model id prefix. */
+  /** The user's own price edits, merged over everything else, keyed by model id prefix. */
   prices?: Record<string, Partial<Price>>;
+  /** Prices applied from Anthropic's pricing page (Settings → Check Anthropic's prices), with when. */
+  published?: { fetchedAt: string; models: Record<string, Omit<Price, 'context'> & { context?: number }> };
   /** IANA time zone used to bucket requests into days. Defaults to the system zone. */
   timeZone?: string;
 }

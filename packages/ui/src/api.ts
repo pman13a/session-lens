@@ -203,6 +203,43 @@ export interface UsageView {
   };
 }
 
+export type PriceSource = 'bundled' | 'anthropic' | 'custom';
+export interface PriceRow {
+  input: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheRead: number;
+  context: number;
+}
+export interface PricingInfo {
+  checkedAt?: string;
+  sourceUrl?: string;
+  webSearchPerRequest: number;
+  appliedFromAnthropic?: string;
+  models: { id: string; price: PriceRow; source: PriceSource; bundled?: PriceRow; edited: Partial<PriceRow> | null; usage: { requests: number; lastTs: number; ids: string[] } | null }[];
+  unpriced: { model: string; requests: number; lastTs: number }[];
+  discount: number;
+  modelDiscounts: Record<string, number>;
+}
+export interface PublishedCheck {
+  fetchedAt: string;
+  url: string;
+  models: (Omit<PriceRow, 'context'> & { id: string; name: string; note?: string; status: 'new' | 'changed' | 'same'; changed: string[]; current?: PriceRow; source: PriceSource | null })[];
+}
+export interface ConfigInfo {
+  roots: string[];
+  configDirs: string[];
+  retentionDays: number;
+  settingsPath: string;
+  timeZone: string | null;
+  systemTimeZone: string;
+  transcripts: number;
+  sessions: number;
+  requests: number;
+  live: number;
+}
+
 interface VsCodeApi {
   postMessage(msg: unknown): void;
 }

@@ -1,5 +1,5 @@
 import './style.css';
-import { api, saveFile, subscribe, type AccountState, type BillingMode, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
+import { api, saveFile, subscribe, type AccountState, type BillingMode, type ConfigInfo, type PricingInfo, type PublishedCheck, type PriceRow, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
 import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextTreemap, cssVar, dailyChart, disposeAll, rangeAccumulationChart, sessionAccumulationChart, timelineChart, setAnimation, usageChart, usageColors } from './charts';
 import { daysAgo, isoDay, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
@@ -96,7 +96,7 @@ function rangeParams(): { from?: string; to?: string; project?: string } {
 /* ---------- routing ---------- */
 
 interface Route {
-  view: 'overview' | 'day' | 'session' | 'request' | 'usage';
+  view: 'overview' | 'day' | 'session' | 'request' | 'usage' | 'settings';
   id?: string;
   params: URLSearchParams;
 }
@@ -111,6 +111,7 @@ function parseRoute(): Route {
   if (view === 'session' && id) return { view: 'session', id, params };
   if (view === 'request' && id) return { view: 'request', id, params };
   if (view === 'usage') return { view: 'usage', params };
+  if (view === 'settings') return { view: 'settings', params };
   return { view: 'overview', params };
 }
 
@@ -230,11 +231,12 @@ function shell() {
         h(
           'div',
           { class: 'seg', role: 'tablist', 'aria-label': 'View' },
-          h('button', { role: 'tab', 'aria-pressed': String(parseRoute().view !== 'usage'), onclick: () => go('#/') }, 'Explorer'),
+          h('button', { role: 'tab', 'aria-pressed': String(!['usage', 'settings'].includes(parseRoute().view)), onclick: () => go('#/') }, 'Explorer'),
           h('button', { role: 'tab', 'aria-pressed': String(parseRoute().view === 'usage'), onclick: () => go('#/usage') }, 'Usage limits'),
+          h('button', { role: 'tab', 'aria-pressed': String(parseRoute().view === 'settings'), onclick: () => go('#/settings') }, 'Settings'),
         ),
         // The Usage limits page has its own range control (UTC, like Claude's page), so hide the Explorer's.
-        h('div', { class: 'filters' }, parseRoute().view === 'usage' ? null : rangeSeg, projectSel, billingSlot),
+        h('div', { class: 'filters' }, ['usage', 'settings'].includes(parseRoute().view) ? null : rangeSeg, parseRoute().view === 'settings' ? null : projectSel, billingSlot),
         h('div', { class: 'spacer' }),
         liveBadge,
         refreshBtn,
@@ -1566,6 +1568,263 @@ function openReferenceDrawer(v: UsageView) {
   document.body.append(drawer);
 }
 
+
+/* ---------- Settings: prices (checked against Anthropic), discounts, plan, data ---------- */
+
+let lastCheck: PublishedCheck | undefined;
+const FIELDS: { key: keyof PriceRow; label: string }[] = [
+  { key: 'input', label: 'Input' },
+  { key: 'output', label: 'Output' },
+  { key: 'cacheWrite5m', label: 'Cache write 5m' },
+  { key: 'cacheWrite1h', label: 'Cache write 1h' },
+  { key: 'cacheRead', label: 'Cache read' },
+];
+const SOURCE_LABEL = { bundled: 'bundled', anthropic: 'from Anthropic', custom: 'your edit' } as const;
+
+async function savePrices(prices: Record<string, Partial<PriceRow> | null>) {
+  await api('settings', {}, { prices });
+  render({ soft: true });
+}
+
+function priceInput(value: number, onSave: (v: number | null) => void, opts: { step?: string; width?: string } = {}) {
+  const i = h('input', { type: 'number', min: '0', step: opts.step ?? 'any', value: String(+value.toFixed(4)), style: { width: opts.width ?? '78px', textAlign: 'right' } }) as HTMLInputElement;
+  i.addEventListener('change', () => onSave(i.value.trim() === '' ? null : Number(i.value)));
+  return i;
+}
+
+async function settingsView(token: number) {
+  const [pr, cfg] = await Promise.all([api<PricingInfo>('pricing'), api<ConfigInfo>('config')]);
+  if (token !== renderToken) return;
+  setCrumbs([{ label: 'Settings' }]);
+  const kids: Node[] = [];
+
+  /* --- prices --- */
+  const status = h('span', { class: 'muted' });
+  const checkBtn = h(
+    'button',
+    {
+      class: 'btn',
+      style: { fontWeight: '600' },
+      title: 'Reads platform.claude.com/docs/en/about-claude/pricing (one request, nothing sent)',
+      onclick: async () => {
+        status.textContent = 'Checking Anthropic’s pricing page…';
+        try {
+          lastCheck = await api<PublishedCheck>('pricing/check', {}, {});
+          render({ soft: true });
+        } catch (e) {
+          status.textContent = `Could not check: ${String(e)}`;
+        }
+      },
+    },
+    'Check Anthropic’s prices',
+  );
+  const pageLink = h('a', { href: pr.sourceUrl ?? '#', target: '_blank', rel: 'noopener', class: 'btn' }, 'Open pricing page');
+  const provenance = [
+    pr.checkedAt ? `Bundled prices checked against Anthropic on ${fmtDay(pr.checkedAt)}.` : '',
+    pr.appliedFromAnthropic ? `Updated from Anthropic’s page on ${fmtDateTime(Date.parse(pr.appliedFromAnthropic))}.` : '',
+    'USD per million tokens. Your edits override everything; Reset restores the layer underneath.',
+  ].filter(Boolean).join(' ');
+  const priceKids: Child[] = [];
+
+  if (lastCheck) {
+    const updates = lastCheck.models.filter((m) => m.status !== 'same');
+    const apply = async (models: PublishedCheck['models']) => {
+      await api('pricing/apply', {}, { fetchedAt: lastCheck!.fetchedAt, models });
+      lastCheck = { ...lastCheck!, models: lastCheck!.models.map((m) => (models.some((x) => x.id === m.id) ? { ...m, status: 'same' as const, changed: [] } : m)) };
+      render({ soft: true });
+    };
+    priceKids.push(
+      h(
+        'div',
+        { class: 'note' },
+        h('b', {}, updates.length ? `Anthropic’s page lists ${updates.length === 1 ? '1 model whose price differs' : `${updates.length} models whose prices differ`} from yours.` : 'All prices match Anthropic’s page.'),
+        ` Checked ${fmtTime(Date.parse(lastCheck.fetchedAt))}. `,
+        updates.length ? h('button', { class: 'btn', style: { marginLeft: '6px', fontWeight: '600' }, onclick: () => apply(updates) }, `Apply ${updates.length}`) : null,
+      ),
+    );
+    if (updates.length)
+      priceKids.push(
+        table(updates, [
+          { key: 'id', label: 'Model', cell: (m) => h('div', {}, h('span', { class: 'mono' }, m.id), h('div', { class: 'muted' }, m.name + (m.note ? ` · ${m.note}` : ''))) },
+          { key: 'status', label: '', cell: (m) => h('span', { class: m.status === 'new' ? 'pill new' : 'pill', title: m.source === 'custom' ? 'You edited this price; Apply replaces your edit' : '' }, m.status === 'new' ? 'new model' : m.source === 'custom' ? 'differs from your edit' : 'changed') },
+          ...FIELDS.map((f) => ({
+            key: f.key,
+            label: f.label,
+            num: true,
+            cell: (m: PublishedCheck['models'][number]) =>
+              m.changed.includes(f.key) && m.current
+                ? h('span', {}, h('s', { class: 'muted' }, `$${m.current[f.key]}`), ' ', h('b', {}, `$${(m as unknown as Record<string, number>)[f.key]}`))
+                : `$${(m as unknown as Record<string, number>)[f.key]}`,
+          })),
+          { key: 'apply', label: '', cell: (m) => h('button', { class: 'btn', onclick: () => apply([m]) }, 'Apply') },
+        ], { id: 'check' }),
+      );
+  }
+
+  if (pr.unpriced.length) {
+    priceKids.push(
+      h('div', { class: 'note' }, `${pr.unpriced.length} model${pr.unpriced.length === 1 ? '' : 's'} in your data ha${pr.unpriced.length === 1 ? 's' : 've'} no price, so ${pr.unpriced.length === 1 ? 'its' : 'their'} requests show as —. Add a price (cache prices default to the standard multipliers):`),
+      table(pr.unpriced, [
+        { key: 'model', label: 'Model', cell: (u) => h('div', {}, h('span', { class: 'mono' }, u.model), h('div', { class: 'muted' }, `${u.requests} requests · last ${fmtDateTime(u.lastTs)}`)) },
+        ...(['input', 'output'] as const).map((f) => ({
+          key: f,
+          label: f === 'input' ? 'Input' : 'Output',
+          num: true,
+          cell: (u: PricingInfo['unpriced'][number]) => priceInput(0, (v) => v != null && savePrices({ [u.model.replace(/-\d{8}$/, '').replace(/\[.*\]$/, '')]: { [f]: v } })),
+        })),
+      ], { id: 'unpriced' }),
+    );
+  }
+
+  const used = pr.models.filter((m) => m.usage);
+  const unused = pr.models.filter((m) => !m.usage);
+  const modelTable = (rows: PricingInfo['models'], id: string) =>
+    table(rows, [
+      {
+        key: 'id',
+        label: 'Model',
+        sort: (m) => m.id,
+        cell: (m) => h('div', {}, h('span', { class: 'mono' }, m.id), m.usage ? h('div', { class: 'muted' }, `${fmtInt(m.usage.requests)} requests · last ${fmtDateTime(m.usage.lastTs)}`) : null),
+      },
+      ...FIELDS.map((f) => ({
+        key: f.key,
+        label: f.label,
+        num: true,
+        cell: (m: PricingInfo['models'][number]) => {
+          const i = priceInput(m.price[f.key], (v) => savePrices({ [m.id]: v == null ? null : { [f.key]: v } }));
+          if (m.edited && f.key in m.edited) i.style.fontWeight = '700';
+          if (m.bundled && m.bundled[f.key] !== m.price[f.key]) i.title = `Bundled: $${m.bundled[f.key]}`;
+          return i;
+        },
+      })),
+      {
+        key: 'context',
+        label: 'Context',
+        num: true,
+        cell: (m) => priceInput(m.price.context, (v) => v != null && savePrices({ [m.id]: { context: Math.round(v) } }), { step: '1000', width: '96px' }),
+      },
+      { key: 'source', label: 'Source', sort: (m) => m.source, cell: (m) => h('span', { class: m.source === 'custom' ? 'pill new' : 'pill' }, SOURCE_LABEL[m.source]) },
+      { key: 'reset', label: '', cell: (m) => (m.edited ? h('button', { class: 'btn', title: 'Remove your edit', onclick: () => savePrices({ [m.id]: null }) }, 'Reset') : null) },
+    ], { id });
+
+  const newId = h('input', { placeholder: 'claude-model-id', style: { width: '200px' } }) as HTMLInputElement;
+  const newIn = h('input', { type: 'number', min: '0', step: 'any', placeholder: 'input $', style: { width: '90px' } }) as HTMLInputElement;
+  const newOut = h('input', { type: 'number', min: '0', step: 'any', placeholder: 'output $', style: { width: '90px' } }) as HTMLInputElement;
+  const addRow = h(
+    'div',
+    { class: 'filters', style: { margin: '10px 0 0' } },
+    h('span', { class: 'muted' }, 'Add a model:'),
+    newId,
+    newIn,
+    newOut,
+    h(
+      'button',
+      {
+        class: 'btn',
+        onclick: () => {
+          const id = newId.value.trim();
+          if (!/^[a-z0-9][a-z0-9.\-]*$/i.test(id) || newIn.value === '' || newOut.value === '') return (status.textContent = 'Enter an id and input and output prices.');
+          void savePrices({ [id]: { input: Number(newIn.value), output: Number(newOut.value) } });
+        },
+      },
+      'Add',
+    ),
+  );
+
+  kids.push(
+    card(
+      'Model prices',
+      provenance,
+      [checkBtn, pageLink],
+      status,
+      ...priceKids,
+      h('h3', { style: { fontSize: '13px', margin: '12px 0 4px' } }, 'Used in your data'),
+      used.length ? modelTable(used, 'used') : h('div', { class: 'muted' }, 'None yet.'),
+      h('details', { style: { marginTop: '10px' } }, h('summary', { style: { cursor: 'pointer' } }, `Other models (${unused.length})`), modelTable(unused, 'unused')),
+      addRow,
+      h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '8px' } }, `Web search: $${pr.webSearchPerRequest} per request. Prices are matched by the longest id prefix, so claude-opus-4 also prices claude-opus-4-1.`),
+    ),
+  );
+
+  /* --- discounts --- */
+  const disc = h('input', { type: 'number', min: '0', max: '94', step: '1', value: pr.discount ? String(Math.round(pr.discount * 100)) : '', placeholder: '0', style: { width: '70px' } }) as HTMLInputElement;
+  disc.addEventListener('change', async () => {
+    await api('settings', {}, { discount: disc.value === '' ? null : Number(disc.value) / 100 });
+    render({ soft: true });
+  });
+  const md = Object.entries(pr.modelDiscounts);
+  const mdId = h('input', { placeholder: 'model prefix, e.g. claude-opus', style: { width: '220px' } }) as HTMLInputElement;
+  const mdPct = h('input', { type: 'number', min: '0', max: '94', step: '1', placeholder: '%', style: { width: '70px' } }) as HTMLInputElement;
+  const saveMd = async (next: Record<string, number>) => {
+    await api('settings', {}, { modelDiscounts: Object.keys(next).length ? next : null });
+    render({ soft: true });
+  };
+  kids.push(
+    card(
+      'Discounts',
+      'Negotiated rates off list price. A per-model rate beats the default; longest prefix wins.',
+      [],
+      h('div', { class: 'filters' }, h('span', {}, 'Default discount'), disc, h('span', { class: 'muted' }, '%')),
+      md.length
+        ? table(md.map(([k, v]) => ({ k, v })), [
+            { key: 'k', label: 'Model prefix', cell: (r) => h('span', { class: 'mono' }, r.k) },
+            { key: 'v', label: 'Discount', num: true, cell: (r) => `${Math.round(r.v * 100)}%` },
+            { key: 'x', label: '', cell: (r) => h('button', { class: 'btn', onclick: () => { const n = { ...pr.modelDiscounts }; delete n[r.k]; void saveMd(n); } }, 'Remove') },
+          ], { id: 'md' })
+        : null,
+      h('div', { class: 'filters', style: { marginTop: '10px' } }, h('span', { class: 'muted' }, 'Add a per-model rate:'), mdId, mdPct, h('button', { class: 'btn', onclick: () => mdId.value.trim() && mdPct.value !== '' && void saveMd({ ...pr.modelDiscounts, [mdId.value.trim()]: Number(mdPct.value) / 100 }) }, 'Add')),
+    ),
+  );
+
+  /* --- plan --- */
+  kids.push(
+    card(
+      'Plan & billing',
+      acct ? `${acct.overridden ? 'Set to' : 'Detected'}: ${MODE_LABEL[acct.mode]} · ${acct.account.label}${acct.planPrice ? ` · plan fee $${acct.planPrice}/mo` : ''}${acct.settings.monthlyLimit ? ` · limit $${acct.settings.monthlyLimit}` : ''} · period starts on day ${acct.settings.periodStartDay}` : '',
+      [h('button', { class: 'btn', onclick: openPlanDrawer }, 'Edit plan…')],
+    ),
+  );
+
+  /* --- data --- */
+  const tzSel = h(
+    'select',
+    {
+      'aria-label': 'Time zone',
+      onchange: async (e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        await api('settings', {}, { timeZone: v || null });
+        render({ soft: true });
+      },
+    },
+    h('option', { value: '' }, `System (${cfg.systemTimeZone})`),
+    h('option', { value: 'UTC', selected: cfg.timeZone === 'UTC' ? 'selected' : null }, 'UTC (matches Claude’s usage page)'),
+    ...(cfg.timeZone && cfg.timeZone !== 'UTC' ? [h('option', { value: cfg.timeZone, selected: 'selected' }, cfg.timeZone)] : []),
+  );
+  const kv = (k: string, v: Child) => h('tr', {}, h('td', { class: 'muted', style: { width: '220px' } }, k), h('td', {}, v));
+  kids.push(
+    card(
+      'Data',
+      'What Session Lens reads, and where it keeps its own files. Everything stays on this computer.',
+      [],
+      h(
+        'table',
+        {},
+        h(
+          'tbody',
+          {},
+          kv('Transcript folders', h('span', { class: 'mono' }, cfg.roots.join(', ') || 'none found')),
+          kv('Indexed', `${fmtInt(cfg.transcripts)} transcripts · ${fmtInt(cfg.sessions)} sessions · ${fmtInt(cfg.requests)} requests · ${cfg.live} live now`),
+          kv('Claude Code keeps transcripts for', `${cfg.retentionDays} days (cleanupPeriodDays in ~/.claude/settings.json)`),
+          kv('Days are counted in', tzSel),
+          kv('Settings file', h('span', { class: 'mono' }, cfg.settingsPath)),
+          kv('Network', 'None, except “Check Anthropic’s prices”, which reads the public pricing page when you click it.'),
+        ),
+      ),
+    ),
+  );
+  swap(...kids);
+}
+
 /* ---------- render loop ---------- */
 
 async function render(opts: { soft?: boolean } = {}) {
@@ -1588,6 +1847,7 @@ async function render(opts: { soft?: boolean } = {}) {
     else if (route.view === 'day') await dayView(token, route.id!);
     else if (route.view === 'session') await sessionView(token, route.id!, route.params.get('day') ?? undefined);
     else if (route.view === 'usage') await usageLimitsView(token);
+    else if (route.view === 'settings') await settingsView(token);
     else await requestView(token, route.id!, route.params);
   } catch (e) {
     if (token === renderToken) swap(h('div', { class: 'empty err' }, `Could not load: ${String(e)}`));
@@ -1635,6 +1895,12 @@ function drawLiveBadge() {
 function onDataChange() {
   if (document.hidden) {
     pendingWhileHidden = true;
+    return;
+  }
+  // Never redraw under someone typing: wait until the field loses focus.
+  const a = document.activeElement;
+  if (a && main.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) {
+    a.addEventListener('blur', () => onDataChange(), { once: true });
     return;
   }
   if (liveTimer) return;

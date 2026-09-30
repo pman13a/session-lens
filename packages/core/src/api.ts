@@ -1,6 +1,8 @@
 import { attribute, sessionComposition, threadRequests } from './attribution.js';
 import { account, billingPeriod, sanitizeSettings, type AccountInfo } from './account.js';
 import { blockText } from './parse.js';
+import { bundledPricing, deriveCache } from './pricing.js';
+import { comparePrices, fetchPublishedPricing, type PublishedModel } from './published.js';
 import { parseDailyPaste, referencePath, saveReference, usageView, type GroupBy } from './usage.js';
 import type { Store } from './store.js';
 import type { Settings } from './types.js';
@@ -384,15 +386,116 @@ export class Api {
   /** Save a settings patch from the UI to the shared settings file and re-price everything. */
   updateSettings(body: unknown) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'expected a JSON object' };
-    const patch = sanitizeSettings(body as Record<string, unknown>);
+    const raw = body as Record<string, unknown>;
+    const patch = sanitizeSettings(raw);
     const next = { ...this.store.settings } as Record<string, unknown>;
+    // Price edits merge per model (null removes the edit, restoring the layer underneath).
+    if (raw.prices && typeof raw.prices === 'object') {
+      const merged = { ...(this.store.settings.prices ?? {}) };
+      for (const [id, v] of Object.entries(raw.prices as Record<string, unknown>)) {
+        if (v === null) delete merged[id];
+        else if (patch.prices?.[id]) merged[id] = { ...(merged[id] ?? {}), ...patch.prices[id] };
+      }
+      patch.prices = Object.keys(merged).length ? merged : undefined;
+    }
     for (const [k, v] of Object.entries(patch)) (v === undefined ? delete next[k] : (next[k] = v));
     this.store.writeSettings(next as Settings);
     this.day = dayFormatter(this.store.settings.timeZone);
     return this.account();
   }
 
-  /** One entry point for every shell: HTTP server, VS Code message bridge, Electron. */
+  /** The price table: every priced model, where its price came from, and whether your data uses it. */
+  pricing() {
+    this.store.refresh();
+    const file = bundledPricing();
+    const usage = new Map<string, { requests: number; lastTs: number; models: Set<string> }>();
+    const unpriced = new Map<string, { requests: number; lastTs: number }>();
+    for (const r of this.store.requests.values()) {
+      const key = this.store.pricer.keyFor(r.model);
+      if (!key) {
+        const u = unpriced.get(r.model) ?? { requests: 0, lastTs: 0 };
+        u.requests++;
+        u.lastTs = Math.max(u.lastTs, r.ts);
+        unpriced.set(r.model, u);
+        continue;
+      }
+      const u = usage.get(key) ?? { requests: 0, lastTs: 0, models: new Set<string>() };
+      u.requests++;
+      u.lastTs = Math.max(u.lastTs, r.ts);
+      u.models.add(r.model);
+      usage.set(key, u);
+    }
+    const st = this.store.settings;
+    return {
+      checkedAt: file.checkedAt,
+      sourceUrl: file.sourceUrl,
+      webSearchPerRequest: file.webSearchPerRequest,
+      appliedFromAnthropic: st.published?.fetchedAt,
+      models: this.store.pricer.table().map((m) => ({
+        ...m,
+        bundled: file.models[m.id],
+        edited: st.prices?.[m.id] ?? null,
+        usage: usage.has(m.id) ? { requests: usage.get(m.id)!.requests, lastTs: usage.get(m.id)!.lastTs, ids: [...usage.get(m.id)!.models] } : null,
+      })),
+      unpriced: [...unpriced.entries()].map(([model, u]) => ({ model, ...u })),
+      discount: st.discount ?? 0,
+      modelDiscounts: st.modelDiscounts ?? {},
+      defaults: deriveCache(1),
+    };
+  }
+
+  /** Fetch Anthropic's pricing page and compare it with what is in effect. The only network request. */
+  async checkPublished(fetchImpl?: typeof fetch) {
+    const pub = await fetchPublishedPricing(fetchImpl);
+    const pricer = this.store.pricer;
+    const rows = comparePrices(pub.models, (id) => ({ price: pricer.price(id), known: pricer.isKnown(id) }));
+    return { fetchedAt: pub.fetchedAt, url: pub.url, models: rows.map((r) => ({ ...r, source: pricer.sources[pricer.keyFor(r.id) ?? ''] ?? null })) };
+  }
+
+  /** Apply published prices (all, or the ones listed) as the "from Anthropic" layer. */
+  applyPublished(body: unknown) {
+    const b = (body ?? {}) as { models?: unknown; fetchedAt?: unknown };
+    if (!Array.isArray(b.models)) return { error: 'expected { models: [...] }' };
+    const ok = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1000;
+    const layer = { ...(this.store.settings.published?.models ?? {}) };
+    for (const m of b.models as PublishedModel[]) {
+      if (!m || typeof m.id !== 'string' || !/^[a-z0-9][a-z0-9.\-]*$/i.test(m.id)) continue;
+      if (![m.input, m.output, m.cacheWrite5m, m.cacheWrite1h, m.cacheRead].every(ok)) continue;
+      const context = this.store.pricer.price(m.id).context;
+      layer[m.id] = { input: m.input, output: m.output, cacheWrite5m: m.cacheWrite5m, cacheWrite1h: m.cacheWrite1h, cacheRead: m.cacheRead, context };
+    }
+    const fetchedAt = typeof b.fetchedAt === 'string' ? b.fetchedAt : new Date().toISOString();
+    // Applying is a choice to use Anthropic's price, so it replaces your edit of the same fields.
+    const prices = { ...(this.store.settings.prices ?? {}) };
+    for (const m of b.models as PublishedModel[]) {
+      const e = m && typeof m.id === 'string' ? prices[m.id] : undefined;
+      if (!e || !layer[m.id]) continue;
+      const rest = Object.fromEntries(Object.entries(e).filter(([k]) => k === 'context'));
+      if (Object.keys(rest).length) prices[m.id] = rest;
+      else delete prices[m.id];
+    }
+    this.store.writeSettings({ ...this.store.settings, prices: Object.keys(prices).length ? prices : undefined, published: { fetchedAt, models: layer } });
+    return this.pricing();
+  }
+
+  /** What Session Lens reads and where it keeps things, for the Settings page. */
+  config() {
+    const st = this.store.settings;
+    return {
+      roots: this.store.roots,
+      configDirs: this.store.configDirs,
+      retentionDays: this.store.retention.days,
+      settingsPath: this.store.settingsPath,
+      timeZone: st.timeZone ?? null,
+      systemTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      transcripts: this.store.files.size,
+      sessions: this.store.sessions.size,
+      requests: this.store.requests.size,
+      live: this.store.live.size,
+    };
+  }
+
+  /** One entry point for every shell: HTTP server, VS Code message bridge, Electron. May return a promise. */
   handle(path: string, params: URLSearchParams, body?: unknown): unknown {
     const q: Query = { from: params.get('from') ?? undefined, to: params.get('to') ?? undefined, project: params.get('project') ?? undefined };
     switch (path) {
@@ -406,6 +509,14 @@ export class Api {
         return this.request(params.get('id') ?? '') ?? { error: 'not found' };
       case '/api/account':
         return this.account();
+      case '/api/pricing':
+        return this.pricing();
+      case '/api/pricing/check':
+        return body === undefined ? { error: 'POST to check' } : this.checkPublished().catch((e) => ({ error: String(e?.message ?? e) }));
+      case '/api/pricing/apply':
+        return body === undefined ? { error: 'POST { models }' } : this.applyPublished(body);
+      case '/api/config':
+        return this.config();
       case '/api/settings':
         return body === undefined ? { error: 'POST a JSON object' } : this.updateSettings(body);
       case '/api/usage':

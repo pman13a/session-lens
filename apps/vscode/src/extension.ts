@@ -56,7 +56,7 @@ function bridge(webview: vscode.Webview): vscode.Disposable {
     if (m.type === 'api') {
       let body: unknown;
       try {
-        body = getApi().handle(`/api/${m.path}`, new URLSearchParams(m.query ?? ''), m.body);
+        body = await getApi().handle(`/api/${m.path}`, new URLSearchParams(m.query ?? ''), m.body);
       } catch (e) {
         body = { error: String(e) };
       }

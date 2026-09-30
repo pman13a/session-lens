@@ -1,5 +1,6 @@
 export * from './types.js';
-export { Pricer, normalizeModel } from './pricing.js';
+export { Pricer, normalizeModel, bundledPricing, deriveCache, type PriceSource } from './pricing.js';
+export { parsePricingMarkdown, fetchPublishedPricing, comparePrices, modelIdFromName, PRICING_PAGE, type PublishedModel } from './published.js';
 export { parseTranscript, TranscriptParser, blockText, parseUsage, toolDetail, locate } from './parse.js';
 export { Store, defaultRoots, configDirs, loadSettings, readLiveSessions, retentionDays, isProcessAlive, type LiveSession } from './store.js';
 export { attribute, apportion, sessionComposition, type CompositionPoint, threadProfile, threadRequests, DEFAULT_CHARS_PER_TOKEN, type Attribution, type ContextItem, type OutputItem } from './attribution.js';

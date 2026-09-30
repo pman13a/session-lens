@@ -119,6 +119,14 @@ It covers Claude Code sessions that ran **on this computer**: the terminal, VS C
 
 ## Settings
 
+The **Settings** tab covers everything below, so you rarely need to edit the file by hand.
+
+- **Model prices.** Every model, with its input, output, 5-minute and 1-hour cache write, cache read, and context prices, and where each price came from: *bundled*, *from Anthropic*, or *your edit*. The models your transcripts use are listed first, with request counts. Edit any cell inline; **Reset** removes your edit. Models with no price are listed so you can add one, and cache prices default to the standard multipliers (1.25×, 2×, 0.1×).
+- **Check Anthropic's prices.** One GET request to the public [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) (its Markdown version). It lists new models and changed prices next to yours, and you can apply them one at a time or all at once. Applied prices form their own layer, so a later bundled update never silently overrides them. This is the only network request Session Lens makes, and it only happens when you click the button.
+- **Discounts.** A default rate, plus rates per model prefix.
+- **Plan & billing.** Opens the same editor as the **Plan…** button.
+- **Data.** Which transcript folders are read, how many transcripts are indexed, Claude Code's retention period, the time zone days are counted in, and where settings are stored.
+
 `~/.session-lens/settings.json` (optional):
 
 ```json

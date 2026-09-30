@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, write
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Api, configDirs, planPriceFor, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
+import { Api, configDirs, planPriceFor, parsePricingMarkdown, modelIdFromName, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
 
 /* ---------- fixture builder ---------- */
 
@@ -562,5 +562,71 @@ describe('fixes from the claude-usage review', () => {
     } finally {
       process.env = env;
     }
+  });
+});
+
+describe('settings: prices from Anthropic', () => {
+  const md = readFileSync(join(__dirname, 'fixtures', 'anthropic-pricing.md'), 'utf8');
+
+  it('parses the published model price table', () => {
+    const rows = parsePricingMarkdown(md);
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId['claude-opus-5-5']).toMatchObject({ input: 4, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2, output: 20 });
+    expect(byId['claude-fable-5-1']).toMatchObject({ input: 10, cacheRead: 0.25, output: 50 });
+    expect(byId['claude-3-5-haiku']).toMatchObject({ input: 0.8, output: 4 });
+    expect(byId['claude-opus-4-1'].note).toMatch(/retired/);
+    expect(modelIdFromName('Claude Sonnet 5.5')).toBe('claude-sonnet-5-5');
+    expect(modelIdFromName('Claude Opus 4')).toBe('claude-opus-4');
+  });
+
+  it('agrees with the bundled table for every model it lists', () => {
+    const p = new Pricer();
+    for (const r of parsePricingMarkdown(md)) {
+      const cur = p.price(r.id);
+      expect([r.id, cur.input, cur.output, cur.cacheRead]).toEqual([r.id, r.input, r.output, r.cacheRead]);
+    }
+  });
+
+  it('layers bundled → applied from Anthropic → your edits, and reset removes an edit', () => {
+    const settingsPath = join(mkdtempSync(join(tmpdir(), 'sl-p-')), 'settings.json');
+    const t = new Transcript('s1');
+    t.prompt('go');
+    t.response('p1', usage(1_000_000, 0, 0, 0), [{ type: 'text', text: 'ok' }], 'claude-nova-1');
+    const store = new Store({ roots: [writeProject({ 's1.jsonl': t.text() })], settings: {}, settingsPath });
+    store.refresh(0);
+    const api = new Api(store);
+    expect(api.pricing().unpriced.map((u) => u.model)).toEqual(['claude-nova-1']);
+    // Anthropic publishes a new model and a price change.
+    api.applyPublished({ fetchedAt: '2026-10-01T00:00:00Z', models: [
+      { id: 'claude-nova-1', name: 'Claude Nova 1', input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', input: 3, output: 20, cacheWrite5m: 5, cacheWrite1h: 8, cacheRead: 0.2 },
+    ] });
+    expect(store.requests.get('p1')!.cost).toBeCloseTo(3);
+    const rows = Object.fromEntries(api.pricing().models.map((m) => [m.id, m]));
+    expect(rows['claude-nova-1'].source).toBe('anthropic');
+    expect(rows['claude-opus-5-5'].price.input).toBe(3);
+    expect(rows['claude-haiku-4-5'].source).toBe('bundled');
+    // Your edit wins, and reset brings back the Anthropic layer.
+    api.updateSettings({ prices: { 'claude-nova-1': { input: 2 } } });
+    expect(store.requests.get('p1')!.cost).toBeCloseTo(2);
+    expect(Object.fromEntries(api.pricing().models.map((m) => [m.id, m.source]))['claude-nova-1']).toBe('custom');
+    api.updateSettings({ prices: { 'claude-nova-1': null } });
+    expect(store.requests.get('p1')!.cost).toBeCloseTo(3);
+    // Applying Anthropic's price over your edit replaces the edited price fields, keeps a context edit.
+    api.updateSettings({ prices: { 'claude-nova-1': { input: 2, context: 500_000 } } });
+    api.applyPublished({ models: [{ id: 'claude-nova-1', name: 'Claude Nova 1', input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 }] });
+    expect(store.requests.get('p1')!.cost).toBeCloseTo(3);
+    expect(store.settings.prices).toEqual({ 'claude-nova-1': { context: 500_000 } });
+    api.updateSettings({ prices: { 'claude-nova-1': null } });
+    // Junk is refused.
+    api.updateSettings({ prices: { 'bad id!': { input: 1 }, 'claude-x': { input: -5 } }, timeZone: 'Mars/Olympus' });
+    expect(Object.keys(store.settings.prices ?? {})).toEqual([]);
+    expect(store.settings.timeZone).toBeUndefined();
+  });
+
+  it('a new model priced by hand gets the standard cache multipliers', () => {
+    const p = new Pricer({ prices: { 'claude-nova-2': { input: 2, output: 10 } } });
+    expect(p.price('claude-nova-2')).toMatchObject({ input: 2, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2, output: 10 });
+    expect(p.sources['claude-nova-2']).toBe('custom');
   });
 });

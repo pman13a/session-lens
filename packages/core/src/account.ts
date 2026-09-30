@@ -138,6 +138,33 @@ export function sanitizeSettings(patch: Record<string, unknown>): Partial<Settin
   if ('planPrice' in patch) out.planPrice = patch.planPrice == null ? undefined : num(patch.planPrice, 0, 100_000);
   if ('monthlyLimit' in patch) out.monthlyLimit = patch.monthlyLimit == null ? undefined : num(patch.monthlyLimit, 0, 10_000_000);
   if ('periodStartDay' in patch) out.periodStartDay = patch.periodStartDay == null ? undefined : num(patch.periodStartDay, 1, 28);
+  if ('prices' in patch && patch.prices && typeof patch.prices === 'object') {
+    const clean: Record<string, Partial<import('./types.js').Price>> = {};
+    for (const [id, v] of Object.entries(patch.prices as Record<string, unknown>)) {
+      if (!/^[a-z0-9][a-z0-9.\-]*$/i.test(id) || !v || typeof v !== 'object') continue;
+      const e: Record<string, number> = {};
+      for (const f of ['input', 'output', 'cacheWrite5m', 'cacheWrite1h', 'cacheRead'] as const) {
+        const n = num((v as Record<string, unknown>)[f], 0, 1000);
+        if (n !== undefined) e[f] = n;
+      }
+      const ctx = num((v as Record<string, unknown>).context, 1000, 100_000_000);
+      if (ctx !== undefined) e.context = Math.round(ctx);
+      if (Object.keys(e).length) clean[id] = e;
+    }
+    out.prices = clean;
+  }
+  if ('timeZone' in patch) {
+    const tz = patch.timeZone;
+    let valid = false;
+    if (typeof tz === 'string' && tz)
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: tz });
+        valid = true;
+      } catch {
+        /* not a zone */
+      }
+    out.timeZone = valid ? (tz as string) : undefined;
+  }
   if ('discount' in patch) out.discount = patch.discount == null ? undefined : num(patch.discount, 0, 0.95);
   if ('modelDiscounts' in patch) {
     const md = patch.modelDiscounts;

@@ -45,9 +45,9 @@ app.whenReady().then(async () => {
   store.watch();
   const api = new Api(store);
 
-  ipcMain.handle('lens:api', (_e, path, query, body) => {
+  ipcMain.handle('lens:api', async (_e, path, query, body) => {
     try {
-      return api.handle(`/api/${String(path)}`, new URLSearchParams(String(query ?? '')), body);
+      return await api.handle(`/api/${String(path)}`, new URLSearchParams(String(query ?? '')), body);
     } catch (err) {
       return { error: String(err) };
     }

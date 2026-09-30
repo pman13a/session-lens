@@ -87,7 +87,7 @@ export function createServer(opts: ServerOptions): Promise<{ server: http.Server
           res.writeHead(405).end();
           return;
         }
-        const body = JSON.stringify(api.handle(url.pathname, url.searchParams, payload));
+        const body = JSON.stringify(await api.handle(url.pathname, url.searchParams, payload));
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         res.end(body);
         return;

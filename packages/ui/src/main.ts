@@ -1604,6 +1604,7 @@ function reconcileCard(v: UsageView): Node {
     h('li', {}, 'Claude Code on the web and cloud sessions started from the app run in Anthropic’s cloud; their transcripts never reach this computer.'),
     h('li', {}, 'Other computers signed in to the same account (sync their ~/.claude/projects to include them).'),
     h('li', {}, 'Small internal calls Claude Code makes (e.g. summarising fetched pages) are billed but not written to transcripts.'),
+    h('li', {}, 'Effort level (faster ↔ smarter) changes how many tokens a request uses, not their price. Those tokens are already counted.'),
     h('li', {}, 'Your organisation’s rates: set a discount or price overrides under Plan… if every day reads high or low by the same ratio.'),
   );
   if (!days.length && refCC == null && v.reference.period.spent == null) {
@@ -1615,6 +1616,21 @@ function reconcileCard(v: UsageView): Node {
       causes,
     );
   }
+  const b = v.billed;
+  const extras = [
+    b.compaction.requests ? `server-side compaction ${fmtUSD(b.compaction.cost)} (${b.compaction.requests} requests)` : '',
+    b.fast.requests ? `fast mode ${fmtUSD(b.fast.cost)} extra (${b.fast.requests} requests at 2×)` : '',
+    b.usOnly.requests ? `US-only inference ${fmtUSD(b.usOnly.cost)} extra (${b.usOnly.requests} requests at 1.1×)` : '',
+  ].filter(Boolean);
+  kids.push(
+    h(
+      'div',
+      { class: 'note' },
+      extras.length
+        ? `Included, from each request's billing details: ${extras.join(' · ')}. These are billed by Anthropic but missing from the plain token counts.`
+        : 'No compaction, fast-mode or US-only charges found in this range.',
+    ),
+  );
   if (refCC != null && cc)
     kids.push(
       h(

@@ -221,6 +221,8 @@ export interface UsageView {
   period: { start: string; end: string; resetsAt: string; spent: number; limit: number | null };
   skills: { name: string; uses: number; sessions: number }[];
   skillsThrough: string;
+  /** Charges beyond top-level token counts, in range (already included in the totals). */
+  billed: Record<'compaction' | 'fast' | 'usOnly', { requests: number; cost: number }>;
   reference: {
     period: { spent?: number; limit?: number };
     range: Partial<Record<'claude_code' | 'chat' | 'cowork' | 'chrome', number>>;

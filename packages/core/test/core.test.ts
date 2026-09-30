@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, write
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Api, configDirs, planPriceFor, parsePricingMarkdown, modelIdFromName, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
+import { Api, parseUsage, configDirs, planPriceFor, parsePricingMarkdown, modelIdFromName, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
 
 /* ---------- fixture builder ---------- */
 
@@ -678,5 +678,33 @@ describe('who made each call', () => {
     expect(a.items.filter((i) => i.kind === 'tool_use').every((i) => i.origin === 'claude')).toBe(true);
     const point = sessionComposition(store, 's1').find((p) => p.id === 'r3')!;
     expect(Object.values(point.byOrigin).reduce((x, y) => x + (y ?? 0), 0)).toBe(point.total);
+  });
+});
+
+describe('what the dashboard bills that top-level usage leaves out', () => {
+  const base = { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 100_000, output_tokens: 1000, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 } };
+  const p = new Pricer();
+  const plain = p.cost('claude-opus-5-5', parseUsage(base));
+
+  it('adds compaction iterations, which the top-level counts exclude', () => {
+    const u = parseUsage({ ...base, iterations: [{ type: 'compaction', input_tokens: 180_000, output_tokens: 3500 }, { type: 'message', ...base }] });
+    expect(u.compaction).toMatchObject({ input: 180_000, output: 3500 });
+    expect(u.input).toBe(10); // the context window itself is unchanged
+    expect(p.cost('claude-opus-5-5', u) - plain).toBeCloseTo((180_000 * 4 + 3500 * 20) / 1e6);
+  });
+
+  it('bills fast mode at the fast rates, cache included', () => {
+    const u = parseUsage({ ...base, speed: 'fast' });
+    expect(p.cost('claude-opus-5-5', u)).toBeCloseTo(plain * 2);
+    // Opus 4.7 has no fast mode: standard rates.
+    expect(p.cost('claude-opus-4-7', u)).toBeCloseTo(p.cost('claude-opus-4-7', parseUsage(base)));
+  });
+
+  it('bills US-only inference at 1.1×, stacked on fast mode', () => {
+    expect(p.cost('claude-opus-5-5', parseUsage({ ...base, inference_geo: 'us' }))).toBeCloseTo(plain * 1.1);
+    expect(p.cost('claude-opus-5-5', parseUsage({ ...base, inference_geo: 'global' }))).toBeCloseTo(plain);
+    expect(p.cost('claude-opus-5-5', parseUsage({ ...base, inference_geo: 'us', speed: 'fast' }))).toBeCloseTo(plain * 2.2);
+    const parts = p.costParts('claude-opus-5-5', parseUsage({ ...base, inference_geo: 'us', speed: 'fast' }));
+    expect(parts.input + parts.cacheWrite + parts.cacheRead + parts.output).toBeCloseTo(plain * 2.2);
   });
 });

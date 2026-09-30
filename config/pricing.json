@@ -1,5 +1,5 @@
 {
-  "_comment": "USD per million tokens. Matched by longest id prefix after stripping date suffixes and [1m]. Cache prices are listed per model: most read at 0.1x input, but Opus 5.5 reads at 0.05x and Fable/Mythos 5.1 at 0.025x. checkedAt is when this table was last compared with sourceUrl.",
+  "_comment": "USD per million tokens. Matched by longest id prefix after stripping date suffixes and [1m]. Cache prices are listed per model: most read at 0.1x input, but Opus 5.5 reads at 0.05x and Fable/Mythos 5.1 at 0.025x. checkedAt is when this table was last compared with sourceUrl. fast: fast-mode input/output rates (cache prices scale with input). usGeoMultiplier: US-only inference (usage.inference_geo = us).",
   "webSearchPerRequest": 0.01,
   "models": {
     "claude-fable-5-1": {
@@ -40,7 +40,11 @@
       "cacheWrite5m": 5,
       "cacheWrite1h": 8,
       "cacheRead": 0.2,
-      "context": 1000000
+      "context": 1000000,
+      "fast": {
+        "input": 8,
+        "output": 40
+      }
     },
     "claude-opus-5": {
       "input": 5,
@@ -48,7 +52,11 @@
       "cacheWrite5m": 6.25,
       "cacheWrite1h": 10,
       "cacheRead": 0.5,
-      "context": 1000000
+      "context": 1000000,
+      "fast": {
+        "input": 10,
+        "output": 50
+      }
     },
     "claude-opus-4-8": {
       "input": 5,
@@ -56,7 +64,11 @@
       "cacheWrite5m": 6.25,
       "cacheWrite1h": 10,
       "cacheRead": 0.5,
-      "context": 1000000
+      "context": 1000000,
+      "fast": {
+        "input": 10,
+        "output": 50
+      }
     },
     "claude-opus-4-7": {
       "input": 5,
@@ -140,5 +152,6 @@
     "context": 1000000
   },
   "checkedAt": "2026-09-30",
-  "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing"
+  "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "usGeoMultiplier": 1.1
 }

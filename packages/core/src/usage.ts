@@ -220,6 +220,8 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
   if (group === 'product') for (const p of PRODUCTS) ensure(p);
 
   let periodSpent = 0;
+  // Charges the top-level token counts alone would miss, in range: shown so a gap to the dashboard can be explained.
+  const billed = { compaction: { requests: 0, cost: 0 }, fast: { requests: 0, cost: 0 }, usOnly: { requests: 0, cost: 0 } };
   const skillUses = new Map<string, { uses: number; sessions: Set<string> }>();
   const yesterday = addDays(today, -1);
   for (const r of store.requests.values()) {
@@ -228,6 +230,25 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
     if (d >= period.start && d <= period.end) periodSpent += c;
     if (q.project && store.sessions.get(r.sessionId)?.project !== q.project) continue;
     if (d >= from && d <= to) {
+      const u = r.usage;
+      if (u.compaction || u.fast || u.usOnly) {
+        const plain = { ...u, compaction: undefined, fast: undefined, usOnly: undefined };
+        const withCompaction = { ...plain, compaction: u.compaction };
+        const withFast = { ...withCompaction, fast: u.fast };
+        const cost = (x: typeof u) => (r.priced ? store.pricer.cost(r.model, x) : 0);
+        if (u.compaction) {
+          billed.compaction.requests++;
+          billed.compaction.cost += cost(withCompaction) - cost(plain);
+        }
+        if (u.fast) {
+          billed.fast.requests++;
+          billed.fast.cost += cost(withFast) - cost(withCompaction);
+        }
+        if (u.usOnly) {
+          billed.usOnly.requests++;
+          billed.usOnly.cost += cost(u) - cost(withFast);
+        }
+      }
       const s = ensure(keyOf(store, r, group));
       const i = bucketIndex.get(interval === 'week' ? utcWeek(d) : d);
       if (i != null) s.values[i] += c;
@@ -300,6 +321,7 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
       .map(([name, e]) => ({ name, uses: e.uses, sessions: e.sessions.size }))
       .sort((a, b) => b.uses - a.uses || a.name.localeCompare(b.name)),
     skillsThrough: yesterday < to ? yesterday : to,
+    billed,
     reference: {
       period: refPeriod,
       range: ref.ranges?.[rangeKey] ?? {},

@@ -7,6 +7,15 @@ export interface Usage {
   output: number;
   thinking: number;
   webSearches: number;
+  /** usage.speed = fast: fast mode, billed at the model's fast rates. */
+  fast?: boolean;
+  /** usage.inference_geo = us: US-only inference, billed at 1.1×. */
+  usOnly?: boolean;
+  /**
+   * Server-side compaction run inside this request (usage.iterations of type compaction). Billed, but
+   * not part of the top-level token counts, and not part of the context window afterwards.
+   */
+  compaction?: Pick<Usage, 'input' | 'cacheWrite5m' | 'cacheWrite1h' | 'cacheRead' | 'output'>;
 }
 
 export type ItemKind =
@@ -89,6 +98,8 @@ export interface Price {
   cacheWrite1h: number;
   cacheRead: number;
   context: number;
+  /** Fast-mode rates, for models that have it. Cache prices scale with input. */
+  fast?: { input: number; output: number };
 }
 
 /**

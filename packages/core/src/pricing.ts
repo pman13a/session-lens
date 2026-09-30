@@ -5,6 +5,8 @@ import type { Price, Settings, Usage } from './types.js';
 
 export interface PricingFile {
   webSearchPerRequest: number;
+  /** US-only inference (usage.inference_geo = us) multiplies every token price. */
+  usGeoMultiplier?: number;
   models: Record<string, Price>;
   fallback: Price;
   checkedAt?: string;
@@ -49,6 +51,7 @@ export class Pricer {
   private models: Record<string, Price>;
   private fallback: Price;
   readonly webSearch: number;
+  readonly usGeo: number;
   readonly discount: number;
   private cache = new Map<string, Price>();
 
@@ -70,6 +73,7 @@ export class Pricer {
     }
     this.fallback = file.fallback;
     this.webSearch = file.webSearchPerRequest;
+    this.usGeo = file.usGeoMultiplier ?? 1.1;
     this.discount = clampDiscount(settings.discount) ?? 0;
     this.modelDiscounts = Object.entries(settings.modelDiscounts ?? {})
       .map(([k, v]) => [normalizeModel(k), clampDiscount(v)] as const)
@@ -86,13 +90,30 @@ export class Pricer {
     return 1 - (hit ? hit[1] : this.discount);
   }
 
+  /**
+   * List-price dollars per component. Includes compaction iterations, fast-mode rates (cache prices
+   * scale with input) and the US-only inference multiplier, all of which stack.
+   */
+  private listParts(model: string, u: Usage): { input: number; cacheWrite: number; cacheRead: number; output: number } {
+    const p = this.price(model);
+    const fin = u.fast && p.fast ? p.fast.input / p.input : 1;
+    const fout = u.fast && p.fast ? p.fast.output / p.output : 1;
+    const geo = u.usOnly ? this.usGeo : 1;
+    const t = { input: u.input, cacheWrite5m: u.cacheWrite5m, cacheWrite1h: u.cacheWrite1h, cacheRead: u.cacheRead, output: u.output };
+    if (u.compaction) for (const k of Object.keys(t) as (keyof typeof t)[]) t[k] += u.compaction[k];
+    const inK = (fin * geo) / 1e6;
+    return {
+      input: t.input * p.input * inK + u.webSearches * this.webSearch,
+      cacheWrite: (t.cacheWrite5m * p.cacheWrite5m + t.cacheWrite1h * p.cacheWrite1h) * inK,
+      cacheRead: t.cacheRead * p.cacheRead * inK,
+      output: (t.output * p.output * fout * geo) / 1e6,
+    };
+  }
+
   /** Cost at list price, before any discount: what Claude Code's own tally reports. */
   listCost(model: string, u: Usage): number {
-    const p = this.price(model);
-    return (
-      (u.input * p.input + u.output * p.output + u.cacheWrite5m * p.cacheWrite5m + u.cacheWrite1h * p.cacheWrite1h + u.cacheRead * p.cacheRead) / 1e6 +
-      u.webSearches * this.webSearch
-    );
+    const x = this.listParts(model, u);
+    return x.input + x.cacheWrite + x.cacheRead + x.output;
   }
 
   /** Longest-prefix match, so `claude-opus-4-1` falls to `claude-opus-4` and `claude-opus-5-5` beats `claude-opus-5`. */
@@ -131,14 +152,9 @@ export class Pricer {
 
   /** Dollars per usage component, discount applied. Web searches ride with input. */
   costParts(model: string, u: Usage): { input: number; cacheWrite: number; cacheRead: number; output: number } {
-    const p = this.price(model);
-    const k = this.discountFactor(model) / 1e6;
-    return {
-      input: (u.input * p.input + u.webSearches * this.webSearch * 1e6) * k,
-      cacheWrite: (u.cacheWrite5m * p.cacheWrite5m + u.cacheWrite1h * p.cacheWrite1h) * k,
-      cacheRead: u.cacheRead * p.cacheRead * k,
-      output: u.output * p.output * k,
-    };
+    const x = this.listParts(model, u);
+    const k = this.discountFactor(model);
+    return { input: x.input * k, cacheWrite: x.cacheWrite * k, cacheRead: x.cacheRead * k, output: x.output * k };
   }
 
   cost(model: string, u: Usage): number {

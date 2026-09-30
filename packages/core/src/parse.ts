@@ -36,20 +36,36 @@ export function toolDetail(name: string, input: Json): string | undefined {
   return typeof pick === 'string' ? oneLine(pick, 120) : undefined;
 }
 
-export function parseUsage(u: Json): Usage {
+function tokens(u: Json) {
   const cc = u?.cache_creation;
   const write = u?.cache_creation_input_tokens ?? 0;
   const w1h = cc?.ephemeral_1h_input_tokens ?? 0;
   const w5m = cc ? cc.ephemeral_5m_input_tokens ?? Math.max(write - w1h, 0) : write;
-  return {
-    input: u?.input_tokens ?? 0,
-    cacheWrite5m: w5m,
-    cacheWrite1h: w1h,
-    cacheRead: u?.cache_read_input_tokens ?? 0,
-    output: u?.output_tokens ?? 0,
+  return { input: u?.input_tokens ?? 0, cacheWrite5m: w5m, cacheWrite1h: w1h, cacheRead: u?.cache_read_input_tokens ?? 0, output: u?.output_tokens ?? 0 };
+}
+
+export function parseUsage(u: Json): Usage {
+  const out: Usage = {
+    ...tokens(u),
     thinking: u?.output_tokens_details?.thinking_tokens ?? 0,
     webSearches: u?.server_tool_use?.web_search_requests ?? 0,
   };
+  if (u?.speed === 'fast') out.fast = true;
+  if (u?.inference_geo === 'us') out.usOnly = true;
+  // The top-level counts leave out compaction iterations; the API bills them, so add them separately.
+  if (Array.isArray(u?.iterations)) {
+    for (const it of u.iterations) {
+      if (it?.type !== 'compaction') continue;
+      const t = tokens(it);
+      const c = (out.compaction ??= { input: 0, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0, output: 0 });
+      c.input += t.input;
+      c.cacheWrite5m += t.cacheWrite5m;
+      c.cacheWrite1h += t.cacheWrite1h;
+      c.cacheRead += t.cacheRead;
+      c.output += t.output;
+    }
+  }
+  return out;
 }
 
 function userPieces(d: Json, toolNames: Map<string, { name: string; detail?: string }>): ContentPiece[] {

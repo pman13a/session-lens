@@ -1,8 +1,9 @@
 import { attribute, sessionComposition, threadRequests } from './attribution.js';
-import { account, billingPeriod, sanitizeSettings, saveSettings, type AccountInfo } from './account.js';
+import { account, billingPeriod, sanitizeSettings, type AccountInfo } from './account.js';
 import { blockText } from './parse.js';
 import { parseDailyPaste, referencePath, saveReference, usageView, type GroupBy } from './usage.js';
 import type { Store } from './store.js';
+import type { Settings } from './types.js';
 import type { Request, Session } from './types.js';
 
 export interface DayRow {
@@ -15,7 +16,7 @@ export interface DayRow {
   requests: number;
   sessions: number;
   costByModel: Record<string, number>;
-  costParts: { input: number; cacheWrite: number; cacheRead: number; output: number };
+  costParts: { input: number; cacheWrite: number; cacheRead: number; output: number; side: number };
 }
 
 export interface SessionRow {
@@ -34,6 +35,8 @@ export interface SessionRow {
   cost: number;
   /** Cost of the whole session, including requests outside the selected range. */
   totalCost: number;
+  /** A Claude Code process for this session is running now. */
+  live: boolean;
   peakContext: number;
   peakContextPct: number;
   /** Context size per main-thread request, for a sparkline. */
@@ -83,14 +86,15 @@ export class Api {
       const d = this.day(r.ts);
       let row = rows.get(d);
       if (!row) {
-        row = { day: d, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cost: 0, costParts: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 }, requests: 0, sessions: 0, costByModel: {}, _sessions: new Set() };
+        row = { day: d, input: 0, cacheWrite: 0, cacheRead: 0, output: 0, cost: 0, costParts: { input: 0, cacheWrite: 0, cacheRead: 0, output: 0, side: 0 }, requests: 0, sessions: 0, costByModel: {}, _sessions: new Set() };
         rows.set(d, row);
       }
       row.input += r.usage.input;
       row.cacheWrite += r.usage.cacheWrite5m + r.usage.cacheWrite1h;
       row.cacheRead += r.usage.cacheRead;
       row.output += r.usage.output;
-      row.cost += r.cost;
+      row.cost += r.cost + r.side;
+      row.costParts.side += r.side;
       const parts = this.store.pricer.costParts(r.model, r.usage);
       row.costParts.input += parts.input;
       row.costParts.cacheWrite += parts.cacheWrite;
@@ -99,7 +103,7 @@ export class Api {
       row.requests++;
       row._sessions.add(r.sessionId);
       const m = shortModel(r.model);
-      row.costByModel[m] = (row.costByModel[m] ?? 0) + r.cost;
+      row.costByModel[m] = (row.costByModel[m] ?? 0) + r.cost + r.side;
     }
     const days = [...rows.values()]
       .sort((a, b) => a.day.localeCompare(b.day))
@@ -124,8 +128,48 @@ export class Api {
       models: [...new Set(reqs.map((r) => shortModel(r.model)))].sort(),
       range: { first: allDays[0], last: allDays[allDays.length - 1] },
       discount: this.store.pricer.discount,
-      unknownModels: [...new Set(all.map((r) => r.model).filter((m) => !this.store.pricer.isKnown(m)))],
+      unknownModels: [...new Set(all.filter((r) => !r.priced).map((r) => r.model))],
+      unpricedRequests: reqs.filter((r) => !r.priced).length,
+      sideCost: sum(reqs, (r) => r.side),
+      history: this.history(),
+      live: this.liveSessions(),
     };
+  }
+
+  /** How far back transcripts go, and how far Claude Code keeps them (it deletes older ones). */
+  history() {
+    const ret = this.store.retention;
+    let oldest = Infinity;
+    for (const r of this.store.requests.values()) if (r.ts < oldest) oldest = r.ts;
+    return {
+      oldestDay: Number.isFinite(oldest) ? this.day(oldest) : undefined,
+      retentionDays: ret.days,
+      keptSince: this.day(ret.since),
+    };
+  }
+
+  /** Sessions whose Claude Code process is running right now, most recently active first. */
+  liveSessions() {
+    const out = [];
+    for (const [id, l] of this.store.live) {
+      const s = this.store.sessions.get(id);
+      const reqs = s ? this.store.sessionRequests(s) : [];
+      const main = reqs.filter((r) => !r.agentId);
+      const last = main[main.length - 1];
+      out.push({
+        id,
+        title: s?.title ?? l.name ?? '(new session)',
+        project: s?.project,
+        entrypoint: l.entrypoint,
+        pid: l.pid,
+        lastTs: s?.lastTs ?? 0,
+        cost: sum(reqs, (r) => r.cost + r.side),
+        contextTokens: last?.contextTokens ?? 0,
+        contextLimit: last?.contextLimit ?? 0,
+        requests: reqs.length,
+      });
+    }
+    return out.sort((a, b) => b.lastTs - a.lastTs);
   }
 
   sessions(q: Query): { sessions: SessionRow[] } {
@@ -162,8 +206,9 @@ export class Api {
         cacheWrite: sum(reqs, (r) => r.usage.cacheWrite5m + r.usage.cacheWrite1h),
         cacheRead: sum(reqs, (r) => r.usage.cacheRead),
         output: sum(reqs, (r) => r.usage.output),
-        cost: sum(reqs, (r) => r.cost),
-        totalCost: sum(all, (r) => r.cost),
+        cost: sum(reqs, (r) => r.cost + r.side),
+        totalCost: sum(all, (r) => r.cost + r.side),
+        live: this.store.live.has(id),
         peakContext: peak,
         peakContextPct: peakPct,
         spark: main.map((r) => r.contextTokens),
@@ -188,7 +233,11 @@ export class Api {
         firstTs: s.firstTs,
         lastTs: s.lastTs,
         reportedCostUSD: s.reportedCostUSD,
-        cost: sum(reqs, (r) => r.cost),
+        cost: sum(reqs, (r) => r.cost + r.side),
+        sideCost: s.sideCost,
+        checkpoint: s.checkpoint,
+        live: this.store.live.has(s.id),
+        unpriced: reqs.filter((r) => !r.priced).length,
       },
       requests: reqs.map((r) => ({
         id: r.id,
@@ -198,6 +247,7 @@ export class Api {
         agentId: r.agentId,
         usage: r.usage,
         cost: r.cost,
+        priced: r.priced,
         costParts: this.store.pricer.costParts(r.model, r.usage),
         contextTokens: r.contextTokens,
         contextLimit: r.contextLimit,
@@ -281,6 +331,7 @@ export class Api {
         agentId: r.agentId,
         usage: r.usage,
         cost: r.cost,
+        priced: r.priced,
         costParts: this.store.pricer.costParts(r.model, r.usage),
         contextTokens: r.contextTokens,
         contextLimit: r.contextLimit,
@@ -299,7 +350,7 @@ export class Api {
     if (!r) return undefined;
     const rec = this.store.record(r.file, uuid);
     if (!rec) return undefined;
-    const text = blockText(this.store.readLine(r.file, rec.line), block);
+    const text = blockText(this.store.readRecord(r.file, rec), block);
     const LIMIT = 200_000;
     return { text: text.length > LIMIT ? text.slice(0, LIMIT) + `\n… (${text.length - LIMIT} more characters)` : text };
   }
@@ -314,12 +365,15 @@ export class Api {
     let cost = 0;
     for (const r of this.store.requests.values()) {
       const d = this.day(r.ts);
-      if (d >= period.start && d <= period.end) cost += r.cost;
+      if (d >= period.start && d <= period.end) cost += r.cost + r.side;
     }
     return {
       account: info,
       mode,
       overridden: st.billing != null,
+      // The plan fee: what you typed under Plan…, else what the detected plan implies.
+      planPrice: st.planPrice ?? info.impliedPlanPrice ?? null,
+      planPriceSource: st.planPrice != null ? 'settings' : info.impliedPlanPrice != null ? 'plan' : null,
       settings: { billing: st.billing ?? 'auto', planPrice: st.planPrice ?? null, monthlyLimit: st.monthlyLimit ?? null, periodStartDay: st.periodStartDay ?? 1, discount: st.discount ?? 0 },
       period: { ...period, cost, projected: period.daysElapsed ? (cost / period.daysElapsed) * period.days : cost },
     };
@@ -328,9 +382,11 @@ export class Api {
   /** Save a settings patch from the UI to the shared settings file and re-price everything. */
   updateSettings(body: unknown) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'expected a JSON object' };
-    const next = saveSettings(this.store.settingsPath, this.store.settings, sanitizeSettings(body as Record<string, unknown>));
-    this.store.setSettings(next);
-    this.day = dayFormatter(next.timeZone);
+    const patch = sanitizeSettings(body as Record<string, unknown>);
+    const next = { ...this.store.settings } as Record<string, unknown>;
+    for (const [k, v] of Object.entries(patch)) (v === undefined ? delete next[k] : (next[k] = v));
+    this.store.writeSettings(next as Settings);
+    this.day = dayFormatter(this.store.settings.timeZone);
     return this.account();
   }
 

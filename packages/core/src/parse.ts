@@ -165,53 +165,74 @@ export interface AgentMeta {
   toolUseId?: string;
 }
 
-export function parseTranscript(path: string, text: string, stat: { mtimeMs: number; size: number }, meta?: AgentMeta): FileIndex {
-  const loc = locate(path);
-  const idx: FileIndex = {
-    path,
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
-    sessionId: loc.sessionId,
-    agentId: loc.agentId,
-    agentType: meta?.agentType,
-    agentDescription: meta?.description,
-    agentToolUseId: meta?.toolUseId,
-    firstTs: Infinity,
-    lastTs: 0,
-    records: [],
-  };
-  const toolNames = new Map<string, { name: string; detail?: string }>();
-  const seen = new Set<string>();
-  let firstPrompt: string | undefined;
-  const lines = text.split('\n');
-  for (let line = 0; line < lines.length; line++) {
-    const raw = lines[line];
-    if (!raw) continue;
+/**
+ * Builds a FileIndex from transcript lines, one at a time, so a live file can be followed by feeding
+ * only what was appended. Each record keeps its byte range for reading the raw line back later.
+ */
+export class TranscriptParser {
+  readonly idx: FileIndex;
+  private toolNames = new Map<string, { name: string; detail?: string }>();
+  private seen = new Set<string>();
+  private firstPrompt?: string;
+  private titled = false;
+
+  constructor(path: string, stat: { mtimeMs: number; size: number }, meta?: AgentMeta) {
+    const loc = locate(path);
+    this.idx = {
+      path,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      sessionId: loc.sessionId,
+      agentId: loc.agentId,
+      agentType: meta?.agentType,
+      agentDescription: meta?.description,
+      agentToolUseId: meta?.toolUseId,
+      firstTs: 0,
+      lastTs: 0,
+      records: [],
+    };
+  }
+
+  /** One complete JSONL line and where it sits in the file (bytes). */
+  feed(raw: string, offset: number, len: number): void {
+    const idx = this.idx;
+    if (!raw.trim()) return;
     let d: Json;
     try {
       d = JSON.parse(raw);
     } catch {
-      continue; // a partially written last line while a session is live
+      return; // a torn line; the tail reader only feeds complete ones, so this is real corruption
     }
     const type = d.type;
-    if (type === 'ai-title' && d.aiTitle) idx.title = d.aiTitle;
-    else if (type === 'custom-title' && d.customTitle) idx.title = d.customTitle;
-    else if (type === 'summary' && d.summary && !idx.title) idx.title = d.summary;
-    else if (type === 'cost-state' && typeof d.totalCostUSD === 'number') idx.reportedCostUSD = d.totalCostUSD;
-    if (type !== 'user' && type !== 'assistant' && type !== 'attachment' && type !== 'system') continue;
-    if (!d.uuid || seen.has(d.uuid)) continue;
-    seen.add(d.uuid);
+    if (type === 'ai-title' && d.aiTitle) {
+      idx.title = d.aiTitle;
+      this.titled = true;
+    } else if (type === 'custom-title' && d.customTitle) {
+      idx.title = d.customTitle;
+      this.titled = true;
+    } else if (type === 'summary' && d.summary && !this.titled) {
+      idx.title = d.summary;
+      this.titled = true;
+    } else if (type === 'cost-state' && typeof d.totalCostUSD === 'number') {
+      idx.reportedCostUSD = d.totalCostUSD;
+      // Claude Code's own running total at this point in the file: a checkpoint to reconcile against.
+      idx.costCheckpoint = { totalUSD: d.totalCostUSD, recordCount: idx.records.length, ts: idx.lastTs };
+    }
+    if (type !== 'user' && type !== 'assistant' && type !== 'attachment' && type !== 'system') return;
+    if (!d.uuid || this.seen.has(d.uuid)) return;
+    this.seen.add(d.uuid);
     const ts = Date.parse(d.timestamp);
-    if (!Number.isFinite(ts)) continue;
+    if (!Number.isFinite(ts)) return;
     if (!idx.cwd && d.cwd) idx.cwd = d.cwd;
-    idx.firstTs = Math.min(idx.firstTs, ts);
+    idx.firstTs = idx.firstTs ? Math.min(idx.firstTs, ts) : ts;
     idx.lastTs = Math.max(idx.lastTs, ts);
     const rec: Rec = {
       uuid: d.uuid,
       parentUuid: d.parentUuid ?? null,
       type,
       ts,
-      line,
+      offset,
+      len,
       promptId: d.promptId,
       entrypoint: d.entrypoint,
       pieces: [],
@@ -219,14 +240,17 @@ export function parseTranscript(path: string, text: string, stat: { mtimeMs: num
     if (type === 'user') {
       rec.isMeta = !!d.isMeta;
       rec.isHuman = d.origin?.kind === 'human' || d.turnOrigin === 'human';
-      rec.pieces = userPieces(d, toolNames);
-      if (!firstPrompt && rec.isHuman && !rec.isMeta) firstPrompt = textOf(d.message?.content);
+      rec.pieces = userPieces(d, this.toolNames);
+      if (!this.firstPrompt && rec.isHuman && !rec.isMeta) {
+        this.firstPrompt = textOf(d.message?.content);
+        if (!this.titled && this.firstPrompt) idx.title = oneLine(this.firstPrompt, 90);
+      }
     } else if (type === 'assistant') {
       const m = d.message ?? {};
       rec.model = m.model;
       rec.requestId = d.requestId ?? (m.model === '<synthetic>' ? undefined : m.id);
       if (m.usage && m.model !== '<synthetic>') rec.usage = parseUsage(m.usage);
-      rec.pieces = assistantPieces(d, toolNames);
+      rec.pieces = assistantPieces(d, this.toolNames);
       rec.stopReason = m.stop_reason ?? undefined;
     } else if (type === 'attachment') {
       rec.pieces = attachmentPieces(d);
@@ -235,9 +259,18 @@ export function parseTranscript(path: string, text: string, stat: { mtimeMs: num
     if (skills.length) rec.skills = skills;
     idx.records.push(rec);
   }
-  if (!idx.title && firstPrompt) idx.title = oneLine(firstPrompt, 90);
-  if (idx.firstTs === Infinity) idx.firstTs = 0;
-  return idx;
+}
+
+/** Parse a whole transcript held in memory (tests, one-off reads). */
+export function parseTranscript(path: string, text: string, stat: { mtimeMs: number; size: number }, meta?: AgentMeta): FileIndex {
+  const p = new TranscriptParser(path, stat, meta);
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    const len = Buffer.byteLength(line);
+    p.feed(line, offset, len);
+    offset += len + 1;
+  }
+  return p.idx;
 }
 
 /** Raw text of one content block, for the "show me what this was" view. */

@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { Api, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
+import { Api, configDirs, planPriceFor, apportion, attribute, billingFor, billingPeriod, detectAccount, normalizeModel, parseDailyPaste, Pricer, sanitizeSettings, sessionComposition, Store, usageView, utcPeriod, utcWeek } from '../src/index.js';
 
 /* ---------- fixture builder ---------- */
 
@@ -382,7 +382,11 @@ describe('dashboard view (matches Claude’s usage page)', () => {
     expect(cc.values.map((x) => +x.toFixed(2))).toEqual([4, 2, 0]); // Opus 5.5 input $4/M
     expect(v.series.map((s) => s.key)).toEqual(['claude_code', 'chat', 'cowork', 'chrome']);
     expect(v.series.find((s) => s.key === 'chat')!.local).toBe(false);
-    expect(v.range.prior).toEqual({ from: '2026-08-29', to: '2026-08-31' });
+    expect(v.range.prior).toEqual({ from: '2026-08-29', to: '2026-08-31', incomplete: false });
+    // Reaching back past the oldest transcript is incomplete, not "−100%".
+    const far = usageView(store(), { from: '2026-08-01', to: '2026-08-31' }, NOW);
+    expect(far.range.prior.incomplete).toBe(true);
+    expect(far.series.find((s) => s.key === 'claude_code')!.change).toBeNull();
   });
 
   it('groups by surface and rolls days into Monday weeks', () => {
@@ -419,5 +423,144 @@ describe('dashboard view (matches Claude’s usage page)', () => {
     expect(v.reference.range).toEqual({ claude_code: 5.5, chat: 1.25 });
     expect(v.reference.days).toEqual({ '2026-09-01': 3.8, '2026-09-02': 1.7 });
     expect(v.period.limit).toBe(300);
+  });
+});
+
+describe('live updates', () => {
+  function configDir() {
+    const dir = mkdtempSync(join(tmpdir(), 'sl-live-'));
+    mkdirSync(join(dir, 'projects', '-work-demo'), { recursive: true });
+    return dir;
+  }
+
+  it('reads only what was appended, holding a half-written line and a split UTF-8 character', () => {
+    const dir = configDir();
+    const file = join(dir, 'projects', '-work-demo', 's1.jsonl');
+    const t = new Transcript('s1');
+    t.prompt('héllo wörld');
+    t.response('l1', usage(10, 0, 100, 5), [{ type: 'text', text: 'first' }]);
+    writeFileSync(file, t.text());
+    const store = new Store({ roots: [join(dir, 'projects')], settings: {}, settingsPath: join(dir, 'sl.json') });
+    store.refresh(0);
+    expect(store.requests.size).toBe(1);
+    t.lines = [];
+    t.prompt('naïve café ✓');
+    t.response('l2', usage(10, 100, 50, 5), [{ type: 'text', text: 'second' }]);
+    const more = Buffer.from(t.text());
+    const cut = more.indexOf(Buffer.from('✓')) + 1; // mid-character, mid-line
+    appendFileSync(file, more.subarray(0, cut));
+    store.refresh(0);
+    expect(store.requests.size).toBe(1);
+    appendFileSync(file, more.subarray(cut));
+    store.refresh(0);
+    expect(store.requests.size).toBe(2);
+    const rec = [...store.files.values()][0].records.find((r) => r.type === 'user' && r.pieces[0]?.label.includes('café'))!;
+    expect(rec.pieces[0].label).toBe('naïve café ✓');
+    expect(JSON.parse(store.readRecord(file, rec)).message.content).toBe('naïve café ✓');
+  });
+
+  it('emits a change when a transcript grows, and when settings change on disk', async () => {
+    const dir = configDir();
+    const file = join(dir, 'projects', '-work-demo', 's1.jsonl');
+    const t = new Transcript('s1');
+    t.prompt('go');
+    t.response('w1', usage(1_000_000, 0, 0, 0), [{ type: 'text', text: 'ok' }]);
+    writeFileSync(file, t.text());
+    const settingsPath = join(dir, 'lens', 'settings.json');
+    const store = new Store({ roots: [join(dir, 'projects')], settingsPath }).watch(100);
+    const next = () => new Promise<void>((resolve) => store.once('change', () => resolve()));
+    try {
+      expect(store.requests.size).toBe(1);
+      let p = next();
+      t.lines = [];
+      t.response('w2', usage(1_000_000, 0, 0, 0), [{ type: 'text', text: 'more' }]);
+      appendFileSync(file, t.text());
+      await p;
+      expect(store.requests.size).toBe(2);
+      // Another shell saves a discount: this one reprices without a restart.
+      p = next();
+      mkdirSync(join(dir, 'lens'), { recursive: true });
+      writeFileSync(settingsPath, JSON.stringify({ discount: 0.5 }));
+      await p;
+      expect(store.requests.get('w1')!.cost).toBeCloseTo(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('knows which sessions are running from the registry', () => {
+    const dir = configDir();
+    const t = new Transcript('s-live');
+    t.prompt('go');
+    t.response('r-live', usage(1, 0, 0, 1), [{ type: 'text', text: 'ok' }]);
+    writeFileSync(join(dir, 'projects', '-work-demo', 's-live.jsonl'), t.text());
+    mkdirSync(join(dir, 'sessions'));
+    writeFileSync(join(dir, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 's-live', entrypoint: 'cli' }));
+    writeFileSync(join(dir, 'sessions', '999999.json'), JSON.stringify({ pid: 999999, sessionId: 's-dead' }));
+    writeFileSync(join(dir, 'sessions', `${process.pid}.abc.key`), 'secret');
+    const store = new Store({ roots: [join(dir, 'projects')], settings: {}, settingsPath: join(dir, 'sl.json') });
+    store.tick();
+    expect([...store.live.keys()]).toEqual(['s-live']);
+    const api = new Api(store);
+    expect(api.sessions({}).sessions[0].live).toBe(true);
+    expect(api.summary({}).live.map((l) => l.id)).toEqual(['s-live']);
+  });
+});
+
+describe('fixes from the claude-usage review', () => {
+  it('reconciles side calls from Claude Code’s own cost-state checkpoint', () => {
+    const t = new Transcript('s1');
+    t.prompt('go');
+    t.response('c1', usage(0, 1_000_000, 0, 0), [{ type: 'text', text: 'ok' }]); // $0.20 at Opus 5.5
+    t.lines.push({ type: 'cost-state', sessionId: 's1', totalCostUSD: 0.23 }); // Claude Code saw $0.03 more
+    t.response('c2', usage(0, 1_000_000, 0, 0), [{ type: 'text', text: 'later' }]); // after the checkpoint
+    const store = makeStore({ 's1.jsonl': t.text() });
+    const s = store.sessions.get('s1')!;
+    expect(s.sideCost).toBeCloseTo(0.03);
+    expect(store.requests.get('c1')!.side).toBeCloseTo(0.03);
+    expect(store.requests.get('c2')!.side).toBe(0);
+    expect(new Api(store).summary({}).totals.cost).toBeCloseTo(0.43);
+  });
+
+  it('never guesses a price for an unknown model', () => {
+    const t = new Transcript('s1');
+    t.prompt('go');
+    t.response('u1', usage(1000, 0, 0, 1000), [{ type: 'text', text: 'ok' }], 'gpt-9-turbo');
+    const store = makeStore({ 's1.jsonl': t.text() });
+    const r = store.requests.get('u1')!;
+    expect(r.priced).toBe(false);
+    expect(r.cost).toBe(0);
+    const sum = new Api(store).summary({});
+    expect(sum.unknownModels).toEqual(['gpt-9-turbo']);
+    expect(sum.unpricedRequests).toBe(1);
+  });
+
+  it('applies per-model discounts, longest prefix first', () => {
+    const p = new Pricer({ discount: 0.1, modelDiscounts: { 'claude-opus': 0.2, 'claude-opus-5-5': 0.5 } });
+    const u = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite1h: 0, cacheWrite5m: 0, thinking: 0, webSearches: 0 };
+    expect(p.cost('claude-opus-5-5', u)).toBeCloseTo(2);
+    expect(p.cost('claude-opus-5', u)).toBeCloseTo(4);
+    expect(p.cost('claude-sonnet-5-5', u)).toBeCloseTo(1.8);
+    expect(p.listCost('claude-opus-5-5', u)).toBeCloseTo(4);
+  });
+
+  it('tells Max 5× from Max 20× by the rate-limit tier', () => {
+    expect(planPriceFor('max', 'default_claude_max_20x')).toBe(200);
+    expect(planPriceFor('max', 'default_claude_max_5x')).toBe(100);
+    expect(planPriceFor('pro', undefined)).toBe(20);
+    expect(planPriceFor('max', undefined)).toBeUndefined();
+  });
+
+  it('resolves config dirs like Claude Code, including XDG_CONFIG_HOME', () => {
+    const env = { ...process.env };
+    try {
+      delete process.env.CLAUDE_CONFIG_DIR;
+      process.env.XDG_CONFIG_HOME = '/x/cfg';
+      expect(configDirs()[0]).toBe('/x/cfg/claude');
+      process.env.CLAUDE_CONFIG_DIR = '/a, /b';
+      expect(configDirs()).toEqual(['/a', '/b']);
+    } finally {
+      process.env = env;
+    }
   });
 });

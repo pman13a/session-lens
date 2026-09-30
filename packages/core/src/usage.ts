@@ -5,7 +5,8 @@
  * Conventions copied from that page: dates are UTC days, the spend period is a UTC month that resets
  * at 00:00 UTC, "vs prior period" compares with the same number of days immediately before.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { writeFileAtomic } from './account.js';
 import { dirname, join } from 'node:path';
 import type { Store } from './store.js';
 import type { Request } from './types.js';
@@ -23,6 +24,9 @@ export type GroupBy = 'product' | 'model' | 'project' | 'surface';
 const SURFACES: Record<string, string> = {
   cli: 'Terminal',
   'claude-vscode': 'VS Code',
+  vscode: 'VS Code',
+  jetbrains: 'JetBrains',
+  mcp: 'MCP server',
   'claude-jetbrains': 'JetBrains',
   'claude-desktop': 'Desktop app',
   remote_mobile: 'Remote / mobile',
@@ -116,8 +120,7 @@ export function saveReference(path: string, patch: unknown): Reference {
       else if (money(v) !== undefined) cur.days[k] = money(v)!;
     }
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(cur, null, 2) + '\n');
+  writeFileAtomic(path, JSON.stringify(cur, null, 2) + '\n');
   return cur;
 }
 
@@ -219,16 +222,17 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
   const yesterday = addDays(today, -1);
   for (const r of store.requests.values()) {
     const d = utcDay(r.ts);
-    if (d >= period.start && d <= period.end) periodSpent += r.cost;
+    const c = r.cost + r.side; // side calls from Claude Code's own tally are real spend the dashboard counts
+    if (d >= period.start && d <= period.end) periodSpent += c;
     if (q.project && store.sessions.get(r.sessionId)?.project !== q.project) continue;
     if (d >= from && d <= to) {
       const s = ensure(keyOf(store, r, group));
       const i = bucketIndex.get(interval === 'week' ? utcWeek(d) : d);
-      if (i != null) s.values[i] += r.cost;
-      s.total += r.cost;
+      if (i != null) s.values[i] += c;
+      s.total += c;
       s.requests++;
     } else if (d >= priorFrom && d <= priorTo) {
-      ensure(keyOf(store, r, group)).prior += r.cost;
+      ensure(keyOf(store, r, group)).prior += c;
     }
   }
   // Top skills, through yesterday (UTC) like the dashboard. Forks copy records, so count each uuid once.
@@ -256,6 +260,14 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
   for (const [d, v] of Object.entries(ref.days ?? {})) if (d >= from && d <= to) refDays[d] = v;
   const refPeriod = ref.periods?.[period.start] ?? {};
 
+  // Claude Code deletes transcripts after cleanupPeriodDays: a prior period reaching past what is kept
+  // (or past the oldest file) is incomplete, not zero.
+  let oldest = Infinity;
+  for (const r of store.requests.values()) if (r.ts < oldest) oldest = r.ts;
+  const oldestDay = Number.isFinite(oldest) ? utcDay(oldest) : undefined;
+  const ret = store.retention;
+  const keptSince = utcDay(now - ret.days * DAY);
+  const priorIncomplete = !oldestDay || priorFrom < oldestDay || priorFrom < keptSince;
   const list = [...series.values()];
   // Stable, entity-bound order: products in their fixed order; everything else by name.
   if (group === 'product') list.sort((a, b) => PRODUCTS.findIndex((p) => p.key === a.key) - PRODUCTS.findIndex((p) => p.key === b.key));
@@ -263,7 +275,8 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
   const total = list.reduce((a, s) => a + s.total, 0);
 
   return {
-    range: { from, to, days: nDays, prior: { from: priorFrom, to: priorTo }, timeZone: 'UTC' },
+    range: { from, to, days: nDays, prior: { from: priorFrom, to: priorTo, incomplete: priorIncomplete }, timeZone: 'UTC' },
+    history: { oldestDay, keptSince, retentionDays: ret.days },
     group,
     interval,
     buckets,
@@ -274,7 +287,7 @@ export function usageView(store: Store, q: UsageQuery, now = Date.now()) {
       total: s.total,
       share: total ? s.total / total : 0,
       prior: s.prior,
-      change: s.prior ? (s.total - s.prior) / s.prior : null,
+      change: priorIncomplete ? null : s.prior ? (s.total - s.prior) / s.prior : null,
       requests: s.requests,
       /** Products Claude Code never writes to disk: the dashboard is the only source for these. */
       local: group !== 'product' || s.key === 'claude_code',

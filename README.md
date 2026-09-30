@@ -21,7 +21,22 @@ npm start               # opens http://127.0.0.1:4317
 - `npm run demo`: generates two weeks of synthetic transcripts and opens the dashboard on them.
 - `node apps/server/dist/cli.js --projects <dir>[,<dir>] --port <n> --no-open`
 - **VS Code:** `npm run package:vscode`, then *Extensions → … → Install from VSIX* and pick `apps/vscode/session-lens.vsix`. Run **Session Lens: Open**, or use the **Session Lens** tab in the bottom panel next to Terminal. Drag either one to the secondary sidebar to keep it on the far right. The status bar shows today's spend.
-- **Desktop window:** `npm run desktop` (Electron; installed separately so the CLI never downloads it).
+- **Desktop window:** `npm run desktop` (Electron; installed separately so the CLI never downloads it). It talks to its window over IPC and opens no network port.
+
+## Live updates
+
+Every view updates while Claude Code works, usually within half a second of a transcript being written. The header shows **● Live · updated hh:mm:ss**.
+
+- **What it follows:** transcripts, Claude Code's live-session registry (`<configDir>/sessions/<pid>.json`), and the shared settings file. It uses `fs.watch` with a 2 s stat poll as backup, because `fs.watch` drops events on macOS and on network filesystems.
+- **Reading cost:** only the bytes appended since the last read, in 2 MB windows, so a 100 MB transcript is never loaded whole. A half-written line, or a character split across two writes, waits for the rest.
+- **How views get the news:**
+  - browser: server-sent events;
+  - VS Code: the extension messages its panels;
+  - desktop app: an IPC event.
+- **Redraws:** in place, at most every 1.5 s. Your scroll position, table sort, expanded prompts, filters and any open drawer are kept. Nothing redraws while the page is hidden; it catches up when you return.
+- **Live now:** a card lists running sessions with their current context and cost.
+- **VS Code status bar:** follows the session you're working in (`42% ctx · $1.23 · $17.65 today`).
+- **Shared settings:** a change made in one shell (browser, VS Code, desktop) reaches the others straight away. Writes are atomic: temp file, then rename.
 
 ## The four levels
 
@@ -41,7 +56,10 @@ npm start               # opens http://127.0.0.1:4317
 ## How the numbers are made
 
 - **Totals are measured.** Every request's `usage` block (input, cache read, cache write 5m/1h, output, thinking, web searches) comes straight from the transcript.
-- **Cost** = those tokens × `config/pricing.json`. The Opus 5.5 rates reproduce Claude Code's own `cost-state` figure to the cent (see `packages/core/test/core.test.ts`). Estimates are at API list prices; subscription plans bill differently.
+- **Cost** = those tokens × `config/pricing.json`. Cache prices are listed per model, not derived: cache reads are 0.1× input on most models, but 0.05× on Opus 5.5 and 0.025× on Fable 5.1. Estimates are at API list prices; subscription plans bill differently.
+- **Side calls are reconciled.** Claude Code writes its own running total (`cost-state`) into the transcript. That total includes calls never written as records: title generation, safety checks, fetch summaries. At the last checkpoint, the gap between Claude Code's total and the records is spread over the requests before it, so session and day totals match Claude Code. Measured: transcript $34.60 + side calls $0.97 = Claude Code's $35.57. It shows as **Side calls** in the daily cost chart and on the session tile.
+- **Unknown models are never guessed.** Their tokens count, their dollars show as "—", and the overview says how many requests are unpriced. Add a price under `prices` in settings.
+- **Deleted history is flagged.** Claude Code deletes transcripts older than `cleanupPeriodDays` (30 by default). A range or prior period that reaches back past that reads "no data", not $0 or −100%.
 - **Per-item tokens are estimates** that always add up to the measured total:
   - *System prompt + tools* never appear in the transcript. They are measured **once**, on a thread's first request, as measured input minus visible content.
   - Visible items are sized by text length at a **calibrated** chars-per-token rate: the median of Δchars/Δtokens between consecutive requests on that thread, about 2.2 on current models. A fixed chars/4 would under-count by nearly half.
@@ -84,6 +102,8 @@ Session Lens asks Claude Code which account is logged in (`claude auth status --
 | Pro / Max | **API-equivalent value**: what the usage would cost on the API | Value so far against your plan fee |
 | Team / Enterprise | **Usage at API rates** | Spend against the monthly allowance |
 
+The Max 5× / 20× tier is read from `~/.claude.json` (`organizationType` and rate-limit tier only, never the email or account IDs), so the plan fee fills itself in: Pro $20, Max 5× $100, Max 20× $200.
+
 The **Billing** menu in the header overrides the detected mode, and **Plan…** sets the plan price, monthly limit, period start day and discount. Changes are saved to `~/.session-lens/settings.json` and shared by the browser, VS Code and desktop versions.
 
 Pro and Max limits are 5-hour and weekly usage windows. Transcripts don't record the percentage used; only claude.ai → Settings → Usage shows it.
@@ -95,7 +115,7 @@ It covers Claude Code sessions that ran **on this computer**: the terminal, VS C
 - Claude Code on the web or cloud sessions started from the phone app, which run in Anthropic's cloud, so their transcripts never reach this machine.
 - Other computers, unless you copy or sync their `~/.claude/projects` and pass every folder with `--projects a,b`. Duplicates are removed automatically.
 - claude.ai chat, the desktop or mobile chat apps, and Cowork. On Pro/Max these draw on the same limits but leave no local transcripts.
-- Small internal calls, such as the model that summarizes WebFetch results, which Claude Code bills but doesn't write to the transcript.
+- Small internal calls that Claude Code bills but doesn't write as records. These are reconciled from Claude Code's own `cost-state` total up to its last checkpoint; calls after that checkpoint are missing until Claude Code writes the next one.
 
 ## Settings
 
@@ -108,6 +128,7 @@ It covers Claude Code sessions that ran **on this computer**: the terminal, VS C
   "monthlyLimit": 500,
   "periodStartDay": 1,
   "discount": 0.1,
+  "modelDiscounts": { "claude-opus": 0.2 },
   "timeZone": "America/Chicago",
   "prices": { "claude-opus-5-5": { "input": 4, "output": 20 } }
 }

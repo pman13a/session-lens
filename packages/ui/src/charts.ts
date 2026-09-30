@@ -40,6 +40,8 @@ export const COMPONENTS = [
   { key: 'output', label: 'Output', slot: 4 },
 ] as const;
 export type ComponentKey = (typeof COMPONENTS)[number]['key'];
+/** Cost Claude Code tallied for calls it never wrote to the transcript (titles, checks, fetch summaries). */
+export const SIDE_COMPONENT = { key: 'side' as const, label: 'Side calls', slot: 5 };
 
 /** Context items fold into eight categories (never more than eight hues). */
 export const CATEGORIES = [
@@ -60,10 +62,17 @@ export function categoryColor(c: (typeof CATEGORIES)[number]): string {
   return c.slot ? series(c.slot) : cssVar('--other');
 }
 
+/** Off while redrawing live, so charts update in place instead of re-animating from zero. */
+let animate = true;
+export function setAnimation(on: boolean) {
+  animate = on;
+}
+
 function base() {
   const text2 = cssVar('--text-secondary');
   const muted = cssVar('--text-muted');
   return {
+    animation: animate,
     animationDuration: 250,
     textStyle: { fontFamily: cssVar('--font'), color: text2 },
     tooltip: {
@@ -119,7 +128,10 @@ export function dailyChart(
   const b = base();
   const chart = mount(el);
   const surface = cssVar('--surface-1');
-  const valueOf = (d: DayRow, k: ComponentKey) => (mode === 'cost' ? d.costParts[k] : d[k]);
+  // In cost mode, side calls (from Claude Code's own tally) get their own segment when there are any.
+  const comps: { key: ComponentKey | 'side'; label: string; slot: number }[] =
+    mode === 'cost' && days.some((d) => (d.costParts.side ?? 0) > 0) ? [...COMPONENTS, SIDE_COMPONENT] : [...COMPONENTS];
+  const valueOf = (d: DayRow, k: ComponentKey | 'side') => (k === 'side' ? d.costParts.side ?? 0 : mode === 'cost' ? d.costParts[k] : d[k]);
   const fmt = mode === 'cost' ? fmtUSD : fmtTokens;
   chart.setOption({
     ...b,
@@ -133,14 +145,14 @@ export function dailyChart(
         const total = mode === 'cost' ? d.cost : d.input + d.cacheWrite + d.cacheRead + d.output;
         return (
           `<div style="font-weight:600;margin-bottom:4px">${fmtDay(d.day)} · ${fmt(total)}</div>` +
-          [...COMPONENTS].reverse().map((c) => row(series(c.slot), c.label, fmt(valueOf(d, c.key)))).join('') +
+          [...comps].reverse().map((c) => row(series(c.slot), c.label, fmt(valueOf(d, c.key)))).join('') +
           `<div style="color:${cssVar('--text-muted')};margin-top:4px">${d.sessions} sessions · ${d.requests} requests · click to open</div>`
         );
       },
     },
     xAxis: { type: 'category', data: days.map((d) => d.day), ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: string) => fmtDay(v).replace(/^\w+, /, '') } },
     yAxis: { type: 'value', ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmt(v) } },
-    series: COMPONENTS.map((c, i) => ({
+    series: comps.map((c, i) => ({
       name: c.label,
       type: 'bar',
       stack: 'x',
@@ -150,7 +162,7 @@ export function dailyChart(
         color: series(c.slot),
         borderColor: surface,
         borderWidth: 1,
-        borderRadius: i === COMPONENTS.length - 1 ? [4, 4, 0, 0] : 0,
+        borderRadius: i === comps.length - 1 ? [4, 4, 0, 0] : 0,
       },
       emphasis: { focus: 'none', itemStyle: { opacity: 0.85 } },
     })),
@@ -274,7 +286,7 @@ export function costChart(el: HTMLElement, reqs: RequestRow[], onReq: (id: strin
         const r = all[ps[0].dataIndex];
         return (
           `<div style="font-weight:600;margin-bottom:4px">#${ps[0].dataIndex + 1} · ${fmtTime(r.ts)} · ${fmtUSD(r.cost)}</div>` +
-          [...COMPONENTS].reverse().map((c) => row(series(c.slot), c.label, fmtUSD(r.costParts[c.key as keyof CostParts]))).join('')
+          [...COMPONENTS].reverse().map((c) => row(series(c.slot), c.label, fmtUSD(r.costParts[c.key as keyof CostParts] ?? 0))).join('')
         );
       },
     },
@@ -285,7 +297,7 @@ export function costChart(el: HTMLElement, reqs: RequestRow[], onReq: (id: strin
       type: 'bar',
       stack: 'c',
       barMaxWidth: 24,
-      data: all.map((r) => r.costParts[c.key as keyof CostParts]),
+      data: all.map((r) => r.costParts[c.key as keyof CostParts] ?? 0),
       itemStyle: { color: series(c.slot), borderColor: surface, borderWidth: all.length > 150 ? 0 : 1, borderRadius: i === COMPONENTS.length - 1 ? [4, 4, 0, 0] : 0 },
     })),
   });

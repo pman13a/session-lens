@@ -1,6 +1,6 @@
 import './style.css';
-import { api, saveFile, type AccountState, type BillingMode, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
-import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll, usageChart, usageColors } from './charts';
+import { api, saveFile, subscribe, type AccountState, type BillingMode, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
+import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll, setAnimation, usageChart, usageColors } from './charts';
 import { daysAgo, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
 /* ---------- tiny DOM helper: text always goes in as textContent ---------- */
@@ -124,6 +124,24 @@ const app = document.getElementById('app')!;
 let main: HTMLElement;
 let crumbs: HTMLElement;
 let renderToken = 0;
+/** True while redrawing for new data (as opposed to navigating): keep scroll, drawers and UI state. */
+let softRender = false;
+
+/** Swap in a view's new content. Charts are disposed only now, so a live redraw never blanks the page. */
+function swap(...nodes: Node[]) {
+  const y = window.scrollY;
+  disposeAll();
+  main.replaceChildren(...nodes);
+  if (softRender) window.scrollTo(0, y);
+}
+
+/* UI state that must survive a live redraw, keyed by where it lives. */
+const tableState = new Map<string, { sortKey?: string; desc: boolean; limit: number }>();
+let tableSeq = 0;
+const openTurns = new Map<string, Set<number>>();
+const requestUi = new Map<string, { filter: 'all' | 'added'; category: string }>();
+const compThread = new Map<string, string>();
+const viewKey = () => location.hash || '#/';
 
 /** Inside VS Code the editor theme decides, via the class it puts on <body>. */
 function hostTheme(): string {
@@ -194,7 +212,9 @@ function shell() {
     },
     'Theme',
   );
-  const refreshBtn = h('button', { class: 'btn', onclick: () => render() }, 'Refresh');
+  const refreshBtn = h('button', { class: 'btn', onclick: () => render({ soft: true }), title: 'Updates are automatic; this forces one now' }, 'Refresh');
+  liveBadge = h('span', { class: 'live-badge', role: 'status', 'aria-live': 'polite' });
+  drawLiveBadge();
   billingSlot = h('span', { class: 'filters' });
   drawBilling();
   crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' });
@@ -216,6 +236,7 @@ function shell() {
         // The Usage limits page has its own range control (UTC, like Claude's page), so hide the Explorer's.
         h('div', { class: 'filters' }, parseRoute().view === 'usage' ? null : rangeSeg, projectSel, billingSlot),
         h('div', { class: 'spacer' }),
+        liveBadge,
         refreshBtn,
         themeBtn,
       ),
@@ -317,10 +338,15 @@ interface Col<T> {
   cls?: string;
 }
 
-function table<T>(rows: T[], cols: Col<T>[], opts: { onRow?: (r: T) => void; initial?: string; desc?: boolean; selected?: (r: T) => boolean; limit?: number } = {}) {
-  let sortKey = opts.initial;
-  let desc = opts.desc ?? true;
-  let limit = opts.limit ?? Infinity;
+function table<T>(rows: T[], cols: Col<T>[], opts: { id?: string; onRow?: (r: T) => void; initial?: string; desc?: boolean; selected?: (r: T) => boolean; limit?: number } = {}) {
+  // A table's sort and "show all" survive live redraws: keyed by view + id (or its order in the view,
+  // for tables that never appear conditionally before others).
+  const key = `${viewKey()}#${opts.id ?? tableSeq++}`;
+  const saved = tableState.get(key);
+  let sortKey = saved ? saved.sortKey : opts.initial;
+  let desc = saved ? saved.desc : opts.desc ?? true;
+  let limit = saved ? saved.limit : opts.limit ?? Infinity;
+  const remember = () => tableState.set(key, { sortKey, desc, limit });
   const wrap = h('div', { class: 'table-wrap' });
   const draw = () => {
     const col = cols.find((c) => c.key === sortKey);
@@ -348,6 +374,7 @@ function table<T>(rows: T[], cols: Col<T>[], opts: { onRow?: (r: T) => void; ini
                     sortKey = c.key;
                     desc = true;
                   }
+                  remember();
                   draw();
                 }
               : null,
@@ -379,6 +406,7 @@ function table<T>(rows: T[], cols: Col<T>[], opts: { onRow?: (r: T) => void; ini
                 class: 'btn',
                 onclick: () => {
                   limit = Infinity;
+                  remember();
                   draw();
                 },
               },
@@ -405,7 +433,7 @@ function heroCostTile(cost: number, sum: Summary) {
   const mode = acct?.mode ?? 'api';
   const disc = sum.discount ? ` after ${fmtPct(sum.discount)} discount` : '';
   if (mode === 'subscription') {
-    const price = acct?.settings.planPrice;
+    const price = acct?.planPrice;
     const days = rangeDays(sum);
     const fee = price ? (price * days) / 30 : 0;
     const sub = price ? `${(cost / fee).toFixed(1)}× the ${fmtUSD(fee)} of plan fee for ${days === 1 ? 'this day' : `these ${days} days`}` : 'what this usage would cost on the API';
@@ -422,7 +450,7 @@ function periodCard(): Node | undefined {
   const head = `${fmtDay(p.start)} – ${fmtDay(p.end)} · day ${p.daysElapsed} of ${p.days}`;
   const setBtn = h('button', { class: 'btn', onclick: openPlanDrawer }, 'Plan…');
   if (acct.mode === 'subscription') {
-    const price = acct.settings.planPrice;
+    const price = acct.planPrice;
     return card(
       'This billing period',
       head,
@@ -521,6 +549,46 @@ function openPlanDrawer() {
   document.body.append(drawer);
 }
 
+/* ---------- live sessions and history coverage ---------- */
+
+type LiveRow = Summary['live'][number];
+
+/** Sessions whose Claude Code process is running right now. */
+function liveCard(rows: LiveRow[]): Node | undefined {
+  if (!rows.length) return undefined;
+  return card(
+    'Live now',
+    `${rows.length} Claude Code session${rows.length === 1 ? '' : 's'} running · updates as they work`,
+    [],
+    table(rows, [
+      { key: 'title', label: 'Session', cls: 'title', cell: (r) => h('div', {}, h('span', { class: 't', title: r.title }, livePill(), r.title), h('span', { class: 'muted' }, `${r.project ?? ''}${r.entrypoint ? ` · ${surfaceName(r.entrypoint)}` : ''}`)) },
+      { key: 'ctx', label: 'Context now', num: true, cell: (r) => (r.contextLimit ? h('span', { title: `${fmtInt(r.contextTokens)} tokens` }, meter(r.contextTokens / r.contextLimit)) : '—') },
+      { key: 'req', label: 'Requests', num: true, cell: (r) => r.requests },
+      { key: 'cost', label: costWord(), num: true, cell: (r) => fmtUSD(r.cost) },
+    ], { id: 'live', onRow: (r) => go(`#/session/${encodeURIComponent(r.id)}`) }),
+  );
+}
+
+function livePill() {
+  return h('span', { class: 'pill live', title: 'A Claude Code process for this session is running' }, 'live');
+}
+
+const SURFACE_NAMES: Record<string, string> = { cli: 'Terminal', 'claude-vscode': 'VS Code', vscode: 'VS Code', jetbrains: 'JetBrains', 'claude-desktop': 'Desktop app', remote_mobile: 'Remote', remote: 'Remote', mcp: 'MCP' };
+const surfaceName = (e: string) => SURFACE_NAMES[e] ?? e;
+
+/** Claude Code deletes old transcripts; say so when the range reaches back past what is kept. */
+function historyNote(h0: Summary['history'], from?: string): Node | undefined {
+  const start = from ?? h0.oldestDay;
+  if (!start) return undefined;
+  const cutoff = h0.oldestDay && h0.oldestDay > h0.keptSince ? h0.oldestDay : h0.keptSince;
+  if (start >= cutoff) return undefined;
+  return h(
+    'div',
+    { class: 'note' },
+    `No data before ${fmtDay(cutoff)}: Claude Code keeps transcripts for ${h0.retentionDays} days, then deletes them. Days before that read as empty, not zero. To keep more, set "cleanupPeriodDays" in ~/.claude/settings.json.`,
+  );
+}
+
 /* ---------- level 1: overview ---------- */
 
 async function overview(token: number) {
@@ -536,7 +604,15 @@ async function overview(token: number) {
   const inTokens = t.input + t.cacheRead + t.cacheWrite;
   const kids: Child[] = [];
   if (sum.unknownModels.length)
-    kids.push(h('div', { class: 'note' }, `No price on file for ${sum.unknownModels.join(', ')}; costed at the fallback rate. Add them to ~/.session-lens/settings.json.`));
+    kids.push(
+      h(
+        'div',
+        { class: 'note' },
+        `No price on file for ${sum.unknownModels.join(', ')}: ${sum.unpricedRequests} request${sum.unpricedRequests === 1 ? '' : 's'} counted in tokens only and shown as —, never guessed. Add a price under "prices" in ~/.session-lens/settings.json.`,
+      ),
+    );
+  const hist = historyNote(sum.history, rangeParams().from);
+  if (hist) kids.push(hist);
   kids.push(
     h(
       'div',
@@ -552,7 +628,7 @@ async function overview(token: number) {
   if (period) kids.push(period);
   if (!sum.days.length) {
     kids.push(h('div', { class: 'empty' }, 'No Claude Code requests in this range. Try "All".'));
-    main.replaceChildren(...kids.map((k) => (k instanceof Node ? k : document.createTextNode(String(k)))));
+    swap(...kids.map((k) => (k instanceof Node ? k : document.createTextNode(String(k)))));
     return;
   }
   const chartEl = h('div', { class: 'chart' });
@@ -568,7 +644,7 @@ async function overview(token: number) {
         ...COMPONENTS.map((c) => ({ key: c.key, label: c.label, num: true, sort: (d: Summary['days'][number]) => d[c.key], cell: (d: Summary['days'][number]) => fmtTokens(d[c.key]) })),
         { key: 'cost', label: costWord(), num: true, sort: (d) => d.cost, cell: (d) => fmtUSD(d.cost) },
       ],
-      { onRow: (d) => go(`#/day/${d.day}`), initial: 'day' },
+      { id: 'days', onRow: (d) => go(`#/day/${d.day}`), initial: 'day' },
     );
   const modeSeg = seg(
     [
@@ -598,13 +674,17 @@ async function overview(token: number) {
       state.dailyMode === 'cost' ? `${costWord()} by day` : 'Tokens by day',
       'Click a day to see its sessions',
       [modeSeg, tableBtn, ...exportButtons('usage-by-day', () => sum.days.map(({ costByModel, costParts, ...d }) => ({ ...d, ...Object.fromEntries(Object.entries(costParts).map(([k, v]) => [`cost_${k}`, v])) })))],
-      legend(COMPONENTS.map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))),
+      legend(
+        [...COMPONENTS, ...(state.dailyMode === 'cost' && sum.days.some((d) => (d.costParts.side ?? 0) > 0) ? [SIDE_COMPONENT] : [])].map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) })),
+      ),
       chartEl,
       tableHolder,
     ),
   );
+  const live = liveCard(sum.live);
+  if (live) kids.splice(1, 0, live);
   kids.push(sessionsCard(sess.sessions, 'Sessions in range', undefined));
-  main.replaceChildren(...(kids.filter(Boolean) as Node[]));
+  swap(...(kids.filter(Boolean) as Node[]));
   dailyChart(chartEl, sum.days, state.dailyMode, (day) => go(`#/day/${day}`));
 }
 
@@ -625,7 +705,7 @@ function sessionsCard(rows: SessionRow[], title: string, day: string | undefined
           label: 'Session',
           sort: (r) => r.title,
           cls: 'title',
-          cell: (r) => h('div', {}, h('span', { class: 't', title: r.title }, r.title), h('span', { class: 'muted' }, `${r.project} · ${fmtDateTime(r.firstTs)} · ${fmtDuration(r.lastTs - r.firstTs)}`)),
+          cell: (r) => h('div', {}, h('span', { class: 't', title: r.title }, r.live ? livePill() : null, r.title), h('span', { class: 'muted' }, `${r.project} · ${fmtDateTime(r.firstTs)} · ${fmtDuration(r.lastTs - r.firstTs)}`)),
         },
         { key: 'models', label: 'Model', cell: (r) => h('span', { class: 'muted' }, r.models.join(', ')) },
         { key: 'requests', label: 'Requests', num: true, sort: (r) => r.requests, cell: (r) => (r.subagents ? `${r.requests} · ${r.subagents} sub` : r.requests) },
@@ -635,7 +715,7 @@ function sessionsCard(rows: SessionRow[], title: string, day: string | undefined
         { key: 'start', label: 'Started', num: true, sort: (r) => r.firstTs, cell: (r) => fmtTime(r.firstTs) },
         { key: 'cost', label: costWord(), num: true, sort: (r) => r.cost, cell: (r) => barCell(r.cost, maxCost, fmtUSD(r.cost)) },
       ],
-      { onRow: (r) => go(`#/session/${encodeURIComponent(r.id)}${q}`), initial: 'cost', limit: 50 },
+      { id: 'sessions', onRow: (r) => go(`#/session/${encodeURIComponent(r.id)}${q}`), initial: 'cost', limit: 50 },
     ),
   );
 }
@@ -647,7 +727,7 @@ async function dayView(token: number, day: string) {
   setCrumbs([{ label: 'Overview', href: '#/' }, { label: fmtDay(day) }]);
   const t = sum.totals;
   const inTokens = t.input + t.cacheRead + t.cacheWrite;
-  main.replaceChildren(
+  swap(
     h(
       'div',
       { class: 'tiles' },
@@ -664,7 +744,7 @@ async function dayView(token: number, day: string) {
 
 function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id: string) => void): Node {
   const chartEl = h('div', { class: 'chart tall' });
-  let thread = '';
+  let thread = compThread.get(d.session.id) ?? '';
   let mode = store.get('compMode', 'tokens') as 'tokens' | 'share';
   const legendHolder = h('div');
   const draw = () => {
@@ -698,11 +778,12 @@ function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id
           'aria-label': 'Thread',
           onchange: (e: Event) => {
             thread = (e.target as HTMLSelectElement).value;
+            compThread.set(d.session.id, thread);
             draw();
           },
         },
         h('option', { value: '' }, 'Main thread'),
-        ...d.subagents.map((a) => h('option', { value: a.agentId }, `Subagent: ${a.agentType ?? 'agent'} · ${a.description ?? a.agentId}`)),
+        ...d.subagents.map((a) => h('option', { value: a.agentId, selected: a.agentId === thread ? 'selected' : null }, `Subagent: ${a.agentType ?? 'agent'} · ${a.description ?? a.agentId}`)),
       ),
     );
   const el = card('What filled the context over time', 'Each request’s context split by kind. Click a point to open that request.', actions, legendHolder, chartEl);
@@ -736,12 +817,21 @@ async function sessionView(token: number, id: string, day?: string) {
     { key: 'ctx', label: 'In context', num: true, cell: (r) => fmtTokens(r.contextTokens) },
     { key: 'write', label: 'Cache write', num: true, cell: (r) => fmtTokens(r.usage.cacheWrite5m + r.usage.cacheWrite1h) },
     { key: 'out', label: 'Output', num: true, cell: (r) => fmtTokens(r.usage.output) },
-    { key: 'cost', label: costWord(), num: true, cell: (r) => fmtUSD(r.cost) },
+    { key: 'cost', label: costWord(), num: true, cell: (r) => (r.priced === false ? h('span', { class: 'muted', title: 'No price on file for this model' }, '—') : fmtUSD(r.cost)) },
   ];
+  const opened = openTurns.get(s.id);
   const turns = d.turns.map((t, i) =>
     h(
       'details',
-      { class: 'turn', open: d.turns.length <= 3 ? '' : null },
+      {
+        class: 'turn',
+        open: (opened ? opened.has(i) : d.turns.length <= 3) ? '' : null,
+        ontoggle: (e: Event) => {
+          const set = openTurns.get(s.id) ?? new Set(d.turns.map((_, k) => k).filter(() => d.turns.length <= 3));
+          (e.target as HTMLDetailsElement).open ? set.add(i) : set.delete(i);
+          openTurns.set(s.id, set);
+        },
+      },
       h(
         'summary',
         {},
@@ -750,14 +840,23 @@ async function sessionView(token: number, id: string, day?: string) {
         h('span', { class: 'muted' }, `${t.requestIds.length} req`),
         h('b', {}, fmtUSD(t.cost)),
       ),
-      table(t.requestIds.map((rid) => byId.get(rid)!.r), reqCols, { onRow: (r) => open(r.id) }),
+      table(t.requestIds.map((rid) => byId.get(rid)!.r), reqCols, { id: `turn:${t.promptId}`, onRow: (r) => open(r.id) }),
     ),
   );
   const kids: Node[] = [
     h(
       'div',
       { class: 'tiles' },
-      tile(acct?.mode === 'subscription' ? 'Session API value' : 'Session cost', fmtUSD(s.cost), s.reportedCostUSD != null ? `Claude Code last logged ${fmtUSD(s.reportedCostUSD)}` : s.project, true),
+      tile(
+        acct?.mode === 'subscription' ? 'Session API value' : 'Session cost',
+        fmtUSD(s.cost),
+        s.sideCost > 0
+          ? `incl. ${fmtUSD(s.sideCost)} of side calls, reconciled to Claude Code’s own ${fmtUSD(s.checkpoint!.claudeCodeUSD)}`
+          : s.reportedCostUSD != null
+            ? `Claude Code last logged ${fmtUSD(s.reportedCostUSD)}`
+            : s.project,
+        true,
+      ),
       tile('Requests', fmtInt(reqs.length), `${d.turns.length} prompts · ${d.subagents.length} subagents`),
       tile('Duration', fmtDuration(s.lastTs - s.firstTs), fmtDateTime(s.firstTs)),
       tile('Peak context', peak ? fmtTokens(peak.contextTokens) : '—', peak ? `${fmtPct(peak.contextTokens / peak.contextLimit)} of ${fmtTokens(peak.contextLimit)}` : ''),
@@ -799,7 +898,7 @@ async function sessionView(token: number, id: string, day?: string) {
         }),
       ),
     );
-  main.replaceChildren(...kids);
+  swap(...kids);
   contextChart(ctxEl, reqs, open);
   costChart(costEl, reqs, open);
 }
@@ -822,8 +921,10 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
     { label: `${r.agentId ? 'Subagent request' : 'Request'} ${d.thread.index + 1} of ${d.thread.count}` },
   ]);
 
-  let filter: 'all' | 'added' = 'all';
-  let category = '';
+  const ui = requestUi.get(r.id) ?? { filter: 'all' as const, category: '' };
+  requestUi.set(r.id, ui);
+  let filter: 'all' | 'added' = ui.filter;
+  let category = ui.category;
   const total = a.measuredInput;
   const byCat = CATEGORIES.map((c) => ({ c, tokens: a.items.filter((i) => categoryOf(i.kind).key === c.key).reduce((s, i) => s + i.tokens, 0) })).filter((x) => x.tokens > 0);
 
@@ -873,6 +974,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
     filter,
     (k) => {
       filter = k;
+      ui.filter = k;
       filterSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'all' : 'added') === k)));
       drawItems();
       disposeTree();
@@ -885,11 +987,12 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
       'aria-label': 'Category',
       onchange: (e: Event) => {
         category = (e.target as HTMLSelectElement).value;
+        ui.category = category;
         drawItems();
       },
     },
     h('option', { value: '' }, 'All kinds'),
-    ...byCat.map((x) => h('option', { value: x.c.key }, x.c.label)),
+    ...byCat.map((x) => h('option', { value: x.c.key, selected: x.c.key === category ? 'selected' : null }, x.c.label)),
   );
   let tree: ReturnType<typeof contextTreemap> | undefined;
   const disposeTree = () => tree?.dispose();
@@ -902,7 +1005,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
   );
 
   const outMax = Math.max(...a.output.map((o) => o.tokens), 0);
-  main.replaceChildren(
+  swap(
     h(
       'div',
       { class: 'tiles' },
@@ -910,7 +1013,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
       tile('Added this turn', fmtTokens(a.addedTokens), d.thread.index ? 'new since the previous request' : 'first request of this thread'),
       tile('Cache read / write', `${fmtTokens(r.usage.cacheRead)} / ${fmtTokens(r.usage.cacheWrite5m + r.usage.cacheWrite1h)}`, `${fmtTokens(r.usage.input)} uncached`),
       tile('Output', fmtTokens(r.usage.output), r.usage.thinking ? `${fmtTokens(r.usage.thinking)} thinking` : r.stopReason ? `stop: ${r.stopReason}` : ''),
-      tile(costWord(), fmtUSD(r.cost), `${r.model} · ${fmtDateTime(r.ts)}`),
+      tile(costWord(), r.priced === false ? '—' : fmtUSD(r.cost), r.priced === false ? `no price on file for ${r.model}` : `${r.model} · ${fmtDateTime(r.ts)}`),
     ),
     h(
       'div',
@@ -938,7 +1041,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
     ),
   );
   drawItems();
-  tree = contextTreemap(treeEl, a.items, (it) => showRaw(r.id, it));
+  tree = contextTreemap(treeEl, a.items, (it) => showRaw(r.id, it), filter === 'added');
 }
 
 /* ---------- raw content drawer ---------- */
@@ -1165,7 +1268,7 @@ async function usageLimitsView(token: number) {
     { key: 'label', label: noun[0].toUpperCase() + noun.slice(1), cell: (r) => h('span', {}, h('span', { class: 'key', style: { background: r.color, borderRadius: '50%' } }), r.label) },
     { key: 'spend', label: 'Spend', num: true, sort: (r) => r.total, cell: (r) => (r.local ? fmtUSD(r.total) : h('span', { class: 'muted', title: 'Not recorded on this computer' }, 'not local')) },
     { key: 'share', label: '% of total', num: true, sort: (r) => r.share, cell: (r) => (r.local ? `${(r.share * 100).toFixed(1)}%` : '—') },
-    { key: 'change', label: 'vs prior period', num: true, sort: (r) => r.change ?? -Infinity, cell: (r) => (r.local ? h('span', { title: `${fmtUSD(r.prior)} in ${rangeText(v.range.prior.from, v.range.prior.to)}` }, signedPct(r.change)) : '—') },
+    { key: 'change', label: 'vs prior period', num: true, sort: (r) => r.change ?? -Infinity, cell: (r) => (r.local ? h('span', { title: `${fmtUSD(r.prior)} in ${rangeText(v.range.prior.from, v.range.prior.to)}` }, v.range.prior.incomplete ? h('span', { class: 'muted', title: 'The prior period reaches back past the oldest transcript Claude Code has kept' }, 'no data') : signedPct(r.change)) : '—') },
   ];
   if (hasRef)
     cols.push(
@@ -1203,7 +1306,7 @@ async function usageLimitsView(token: number) {
       : h('div', { class: 'muted' }, 'No skills used in this range.'),
   );
 
-  main.replaceChildren(header, controls, chartCard, tableCard, reconcileCard(v), skillsCard);
+  swap(header, controls, chartCard, tableCard, reconcileCard(v), skillsCard);
   if (v.series.some((s) => s.total > 0) || hasRefDays) usageChart(chartEl, v, (bk) => go(`#/day/${bk}`));
   else chartEl.replaceChildren(h('div', { class: 'empty' }, 'No Claude Code spend in this range.'));
 }
@@ -1358,13 +1461,15 @@ function openReferenceDrawer(v: UsageView) {
 
 /* ---------- render loop ---------- */
 
-async function render() {
+async function render(opts: { soft?: boolean } = {}) {
   const token = ++renderToken;
-  closeRaw();
+  softRender = !!opts.soft;
+  setAnimation(!softRender);
+  tableSeq = 0;
+  if (!softRender) closeRaw();
   const route = parseRoute();
-  main.classList.add('loading');
+  if (!softRender) main.classList.add('loading');
   try {
-    disposeAll();
     try {
       acct = await api<AccountState>('account');
     } catch {
@@ -1378,14 +1483,73 @@ async function render() {
     else if (route.view === 'usage') await usageLimitsView(token);
     else await requestView(token, route.id!, route.params);
   } catch (e) {
-    if (token === renderToken) main.replaceChildren(h('div', { class: 'empty err' }, `Could not load: ${String(e)}`));
+    if (token === renderToken) swap(h('div', { class: 'empty err' }, `Could not load: ${String(e)}`));
   } finally {
     if (token === renderToken) {
       main.classList.remove('loading');
-      window.scrollTo({ top: 0 });
+      if (!softRender) window.scrollTo({ top: 0 });
+      markUpdated();
     }
   }
 }
+
+/* ---------- live: redraw in place when Claude Code writes new data ---------- */
+
+let liveState: 'connecting' | 'live' | 'offline' = 'connecting';
+let lastUpdated = 0;
+let liveTimer: ReturnType<typeof setTimeout> | undefined;
+let lastLive = 0;
+let pendingWhileHidden = false;
+let liveBadge: HTMLElement | undefined;
+
+function markUpdated() {
+  lastUpdated = Date.now();
+  drawLiveBadge();
+}
+
+function drawLiveBadge() {
+  if (!liveBadge) return;
+  const dot = liveState === 'live' ? cssVar('--good') : liveState === 'offline' ? cssVar('--critical') : cssVar('--text-muted');
+  const label = liveState === 'live' ? 'Live' : liveState === 'offline' ? 'Offline' : 'Connecting';
+  liveBadge.replaceChildren(
+    h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: dot, display: 'inline-block' }, 'aria-hidden': 'true' }),
+    h('span', {}, label),
+    ...(lastUpdated ? [h('span', { class: 'muted' }, `· updated ${fmtTime(lastUpdated)}`)] : []),
+  );
+  liveBadge.title =
+    liveState === 'live'
+      ? 'Updates within a couple of seconds of Claude Code writing to a transcript'
+      : liveState === 'offline'
+        ? 'Lost the connection to Session Lens; retrying. Numbers may be stale.'
+        : 'Connecting…';
+}
+
+/** At most one redraw every 1.5 s while a session streams; none while the page is hidden. */
+function onDataChange() {
+  if (document.hidden) {
+    pendingWhileHidden = true;
+    return;
+  }
+  if (liveTimer) return;
+  const wait = Math.max(0, 1500 - (Date.now() - lastLive));
+  liveTimer = setTimeout(() => {
+    liveTimer = undefined;
+    lastLive = Date.now();
+    render({ soft: true });
+  }, wait);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && pendingWhileHidden) {
+    pendingWhileHidden = false;
+    onDataChange();
+  }
+});
+
+subscribe(onDataChange, (st) => {
+  liveState = st;
+  drawLiveBadge();
+});
 
 shell();
 window.addEventListener('hashchange', () => {

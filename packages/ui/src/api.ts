@@ -28,6 +28,8 @@ export interface CostParts {
   cacheWrite: number;
   cacheRead: number;
   output: number;
+  /** Day totals only: side calls reconciled from Claude Code's own tally. */
+  side?: number;
 }
 
 export interface Summary {
@@ -38,6 +40,10 @@ export interface Summary {
   range: { first?: string; last?: string };
   discount: number;
   unknownModels: string[];
+  unpricedRequests: number;
+  sideCost: number;
+  history: { oldestDay?: string; retentionDays: number; keptSince: string };
+  live: { id: string; title: string; project?: string; entrypoint?: string; pid: number; lastTs: number; cost: number; contextTokens: number; contextLimit: number; requests: number }[];
 }
 
 export interface SessionRow {
@@ -58,6 +64,7 @@ export interface SessionRow {
   peakContext: number;
   peakContextPct: number;
   spark: number[];
+  live: boolean;
 }
 
 export interface RequestRow {
@@ -69,6 +76,7 @@ export interface RequestRow {
   usage: Usage;
   cost: number;
   costParts: CostParts;
+  priced?: boolean;
   contextTokens: number;
   contextLimit: number;
   tools: string[];
@@ -77,7 +85,20 @@ export interface RequestRow {
 }
 
 export interface SessionDetail {
-  session: { id: string; project: string; cwd?: string; title: string; firstTs: number; lastTs: number; reportedCostUSD?: number; cost: number };
+  session: {
+    id: string;
+    project: string;
+    cwd?: string;
+    title: string;
+    firstTs: number;
+    lastTs: number;
+    reportedCostUSD?: number;
+    cost: number;
+    sideCost: number;
+    checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number };
+    live: boolean;
+    unpriced: number;
+  };
   requests: RequestRow[];
   turns: { promptId: string; text: string; ts: number; requestIds: string[]; cost: number; output: number }[];
   subagents: { agentId: string; agentType?: string; description?: string; requests: number; cost: number; firstTs: number; model?: string }[];
@@ -133,6 +154,9 @@ export interface AccountState {
   account: { source: string; loggedIn: boolean; authMethod?: string; subscriptionType?: string | null; orgName?: string | null; email?: string | null; detected: BillingMode; label: string };
   mode: BillingMode;
   overridden: boolean;
+  /** Plan fee in effect: typed under Plan…, else implied by the detected plan (Max 5×/20×, Pro). */
+  planPrice: number | null;
+  planPriceSource: 'settings' | 'plan' | null;
   settings: { billing: BillingMode | 'auto'; planPrice: number | null; monthlyLimit: number | null; periodStartDay: number; discount: number };
   period: { start: string; end: string; days: number; daysElapsed: number; cost: number; projected: number };
 }
@@ -159,7 +183,8 @@ export interface UsageSeries {
 }
 
 export interface UsageView {
-  range: { from: string; to: string; days: number; prior: { from: string; to: string }; timeZone: string };
+  range: { from: string; to: string; days: number; prior: { from: string; to: string; incomplete: boolean }; timeZone: string };
+  history: { oldestDay?: string; keptSince: string; retentionDays: number };
   group: 'product' | 'model' | 'project' | 'surface';
   interval: 'day' | 'week';
   buckets: string[];
@@ -179,9 +204,17 @@ export interface UsageView {
 interface VsCodeApi {
   postMessage(msg: unknown): void;
 }
+/** What the Electron preload exposes: IPC instead of a local web server. */
+interface DesktopBridge {
+  api(path: string, query: string, body?: unknown): Promise<unknown>;
+  onChange(cb: () => void): void;
+  save(name: string, content: string): void;
+}
+
 declare global {
   interface Window {
     acquireVsCodeApi?: () => VsCodeApi;
+    sessionLens?: DesktopBridge;
   }
 }
 
@@ -209,6 +242,8 @@ export async function api<T>(path: string, params: Record<string, string | undef
       pending.set(id, resolve);
       vscode!.postMessage({ type: 'api', id, path, query: qs.toString(), body: post });
     });
+  } else if (window.sessionLens) {
+    body = await window.sessionLens.api(path, qs.toString(), post);
   } else {
     const res = await fetch(
       `./api/${path}?${qs}`,
@@ -226,6 +261,10 @@ export function saveFile(name: string, content: string, mime: string) {
     vscode.postMessage({ type: 'save', name, content });
     return;
   }
+  if (window.sessionLens) {
+    window.sessionLens.save(name, content);
+    return;
+  }
   const url = URL.createObjectURL(new Blob([content], { type: mime }));
   const a = document.createElement('a');
   a.href = url;
@@ -234,4 +273,37 @@ export function saveFile(name: string, content: string, mime: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Hear about new data as it lands: server-sent events over HTTP, a message from the VS Code extension,
+ * or an IPC event in the desktop app. `onState` reports whether the live link is up.
+ */
+export function subscribe(onChange: () => void, onState: (state: 'live' | 'offline') => void) {
+  if (vscode) {
+    window.addEventListener('message', (e: MessageEvent) => {
+      if ((e.data as { type?: string })?.type === 'change') onChange();
+    });
+    onState('live');
+    return;
+  }
+  if (window.sessionLens) {
+    window.sessionLens.onChange(onChange);
+    onState('live');
+    return;
+  }
+  if (typeof EventSource === 'undefined') return onState('offline');
+  const es = new EventSource('./api/events');
+  es.addEventListener('change', () => onChange());
+  // Reconnecting after a drop may have missed changes: catch up once it is back.
+  let wasDown = false;
+  es.onopen = () => {
+    onState('live');
+    if (wasDown) onChange();
+    wasDown = false;
+  };
+  es.onerror = () => {
+    wasDown = true;
+    onState('offline');
+  };
 }

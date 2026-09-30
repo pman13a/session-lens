@@ -42,7 +42,9 @@ export interface Rec {
   parentUuid: string | null;
   type: 'user' | 'assistant' | 'attachment' | 'system';
   ts: number;
-  line: number;
+  /** Byte range of the raw JSONL line, for reading it back on demand. */
+  offset: number;
+  len: number;
   promptId?: string;
   requestId?: string;
   model?: string;
@@ -74,6 +76,8 @@ export interface FileIndex {
   records: Rec[];
   /** Claude Code's own running cost for the session, when it wrote one. */
   reportedCostUSD?: number;
+  /** The last such record, with how many records preceded it: used to reconcile. */
+  costCheckpoint?: { totalUSD: number; recordCount: number; ts: number };
 }
 
 export interface Price {
@@ -93,7 +97,12 @@ export interface Request {
   ts: number;
   model: string;
   usage: Usage;
+  /** Dollars for this request's own tokens (0 when the model has no known price). */
   cost: number;
+  /** Its share of side calls reconciled from Claude Code's own tally (see Store.reconcile). */
+  side: number;
+  /** False for a model with no price on file: tokens count, dollars do not. */
+  priced: boolean;
   /** Tokens occupying the context window for this call: input + cache read + cache write. */
   contextTokens: number;
   contextLimit: number;
@@ -127,6 +136,9 @@ export interface Session {
   requestIds: string[];
   subagents: SubagentInfo[];
   reportedCostUSD?: number;
+  /** Side calls: Claude Code's own tally minus what the transcript records add up to, at the last checkpoint. */
+  sideCost: number;
+  checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number };
 }
 
 export interface Totals {
@@ -152,6 +164,8 @@ export interface Settings {
   periodStartDay?: number;
   /** Fraction taken off every cost, e.g. 0.1 for a 10% negotiated discount. */
   discount?: number;
+  /** Per-model discounts by id prefix (longest wins), for contracts that price models differently. */
+  modelDiscounts?: Record<string, number>;
   /** Per-model overrides merged over pricing.json, keyed by model id prefix. */
   prices?: Record<string, Partial<Price>>;
   /** IANA time zone used to bucket requests into days. Defaults to the system zone. */

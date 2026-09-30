@@ -20,6 +20,7 @@
   --series-7: #4a3aa7;
   --series-8: #e34948;
   --other: #b5b3ab;
+  --good: #0ca30c;
   --warning: #fab219;
   --critical: #d03b3b;
   --font: system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -166,3 +167,7 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
 .err { color: var(--critical); }
 svg.spark { display: block; }
+
+.live-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+.pill.live { background: rgba(12, 163, 12, 0.14); color: var(--text-primary); margin-right: 6px; font-weight: 600; }
+.pill.live::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--good); margin-right: 4px; vertical-align: 1px; }

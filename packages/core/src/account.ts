@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { BillingMode, Settings } from './types.js';
@@ -18,6 +18,38 @@ export interface AccountInfo {
   email?: string | null;
   detected: BillingMode;
   label: string;
+  /** e.g. default_claude_max_5x: tells Max 5× from Max 20× (claude auth status does not). */
+  rateLimitTier?: string;
+  /** Monthly fee implied by the plan, when it can be told: Pro $20, Max 5× $100, Max 20× $200. */
+  impliedPlanPrice?: number;
+}
+
+/**
+ * The billing shape from ~/.claude.json's `oauthAccount`: organizationType and rate-limit tier only.
+ * The same object holds the email and account ids; they are not read.
+ */
+export function readPlanTier(): { organizationType?: string; rateLimitTier?: string } {
+  const configDir = process.env.CLAUDE_CONFIG_DIR?.split(',')[0]?.trim();
+  for (const p of [configDir ? join(configDir, '.claude.json') : '', join(homedir(), '.claude.json')].filter(Boolean)) {
+    try {
+      const o = JSON.parse(readFileSync(p, 'utf8'))?.oauthAccount;
+      if (!o || typeof o !== 'object') continue;
+      const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+      return { organizationType: str(o.organizationType), rateLimitTier: str(o.organizationRateLimitTier) ?? str(o.userRateLimitTier) };
+    } catch {
+      /* next */
+    }
+  }
+  return {};
+}
+
+export function planPriceFor(subscriptionType?: string | null, tier?: string): number | undefined {
+  const t = (tier ?? '').toLowerCase();
+  if (/max.*20x|20x/.test(t)) return 200;
+  if (/max.*5x|5x/.test(t)) return 100;
+  const sub = (subscriptionType ?? '').toLowerCase();
+  if (sub === 'pro' || /claude_pro/.test(t)) return 20;
+  return undefined;
 }
 
 export const DEFAULT_SETTINGS_PATH = join(homedir(), '.session-lens', 'settings.json');
@@ -53,7 +85,10 @@ export function detectAccount(run: (cmd: string, args: string[]) => string | und
         email: j.email ?? null,
       };
       const b = billingFor(base);
-      return { source: 'claude-cli', ...base, detected: b.mode, label: b.label };
+      const tier = readPlanTier();
+      const price = b.mode === 'subscription' ? planPriceFor(base.subscriptionType, tier.rateLimitTier) : undefined;
+      const label = price === 200 ? 'Max 20× plan' : price === 100 ? 'Max 5× plan' : b.label;
+      return { source: 'claude-cli', ...base, detected: b.mode, label, rateLimitTier: tier.rateLimitTier, impliedPlanPrice: price };
     } catch {
       /* fall through */
     }
@@ -103,7 +138,19 @@ export function sanitizeSettings(patch: Record<string, unknown>): Partial<Settin
   if ('planPrice' in patch) out.planPrice = patch.planPrice == null ? undefined : num(patch.planPrice, 0, 100_000);
   if ('monthlyLimit' in patch) out.monthlyLimit = patch.monthlyLimit == null ? undefined : num(patch.monthlyLimit, 0, 10_000_000);
   if ('periodStartDay' in patch) out.periodStartDay = patch.periodStartDay == null ? undefined : num(patch.periodStartDay, 1, 28);
-  if ('discount' in patch) out.discount = patch.discount == null ? undefined : num(patch.discount, 0, 1);
+  if ('discount' in patch) out.discount = patch.discount == null ? undefined : num(patch.discount, 0, 0.95);
+  if ('modelDiscounts' in patch) {
+    const md = patch.modelDiscounts;
+    if (md == null) out.modelDiscounts = undefined;
+    else if (typeof md === 'object') {
+      const clean: Record<string, number> = {};
+      for (const [k, v] of Object.entries(md as Record<string, unknown>)) {
+        const d = num(v, 0, 0.95);
+        if (/^[a-z0-9.\-]+$/i.test(k) && d !== undefined) clean[k] = d;
+      }
+      out.modelDiscounts = Object.keys(clean).length ? clean : undefined;
+    }
+  }
   return out;
 }
 
@@ -114,9 +161,16 @@ export function saveSettings(path: string, current: Settings, patch: Partial<Set
     if (v === undefined) delete (next as Record<string, unknown>)[k];
     else (next as Record<string, unknown>)[k] = v;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(next, null, 2) + '\n');
+  writeFileAtomic(path, JSON.stringify(next, null, 2) + '\n');
   return next;
+}
+
+/** Write to a temp file, then rename: another shell reading at that instant sees the old or the new file, never half. */
+export function writeFileAtomic(path: string, data: string) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, data);
+  renameSync(tmp, path);
 }
 
 /** The billing period containing `now`, starting on `startDay` of the month. Local dates, YYYY-MM-DD. */

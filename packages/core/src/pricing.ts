@@ -45,7 +45,29 @@ export class Pricer {
     }
     this.fallback = file.fallback;
     this.webSearch = file.webSearchPerRequest;
-    this.discount = Math.min(Math.max(settings.discount ?? 0, 0), 1);
+    this.discount = clampDiscount(settings.discount) ?? 0;
+    this.modelDiscounts = Object.entries(settings.modelDiscounts ?? {})
+      .map(([k, v]) => [normalizeModel(k), clampDiscount(v)] as const)
+      .filter((e): e is readonly [string, number] => e[1] !== undefined)
+      .sort((a, b) => b[0].length - a[0].length);
+  }
+
+  private modelDiscounts: (readonly [string, number])[];
+
+  /** 1 − the discount that applies to this model (a per-model rate beats the default). */
+  discountFactor(model: string): number {
+    const id = normalizeModel(model);
+    const hit = this.modelDiscounts.find(([k]) => id === k || id.startsWith(k + '-'));
+    return 1 - (hit ? hit[1] : this.discount);
+  }
+
+  /** Cost at list price, before any discount: what Claude Code's own tally reports. */
+  listCost(model: string, u: Usage): number {
+    const p = this.price(model);
+    return (
+      (u.input * p.input + u.output * p.output + u.cacheWrite5m * p.cacheWrite5m + u.cacheWrite1h * p.cacheWrite1h + u.cacheRead * p.cacheRead) / 1e6 +
+      u.webSearches * this.webSearch
+    );
   }
 
   /** Longest-prefix match, so `claude-opus-4-1` falls to `claude-opus-4` and `claude-opus-5-5` beats `claude-opus-5`. */
@@ -70,7 +92,7 @@ export class Pricer {
   /** Dollars per usage component, discount applied. Web searches ride with input. */
   costParts(model: string, u: Usage): { input: number; cacheWrite: number; cacheRead: number; output: number } {
     const p = this.price(model);
-    const k = (1 - this.discount) / 1e6;
+    const k = this.discountFactor(model) / 1e6;
     return {
       input: (u.input * p.input + u.webSearches * this.webSearch * 1e6) * k,
       cacheWrite: (u.cacheWrite5m * p.cacheWrite5m + u.cacheWrite1h * p.cacheWrite1h) * k,
@@ -80,15 +102,12 @@ export class Pricer {
   }
 
   cost(model: string, u: Usage): number {
-    const p = this.price(model);
-    const usd =
-      (u.input * p.input +
-        u.output * p.output +
-        u.cacheWrite5m * p.cacheWrite5m +
-        u.cacheWrite1h * p.cacheWrite1h +
-        u.cacheRead * p.cacheRead) /
-        1e6 +
-      u.webSearches * this.webSearch;
-    return usd * (1 - this.discount);
+    return this.listCost(model, u) * this.discountFactor(model);
   }
+
+}
+
+/** A discount must be a fraction below 0.95; anything else is far likelier a typo than a contract. */
+function clampDiscount(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 0.95 ? v : undefined;
 }

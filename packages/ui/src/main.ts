@@ -1050,13 +1050,16 @@ async function sessionView(token: number, id: string, day?: string) {
   const opened = openTurns.get(s.id);
   // Heat scale for prompt cost: green (cheapest) to red (most expensive), on a log scale so one huge
   // prompt doesn't turn every other one green.
-  const costs = d.turns.map((t) => t.cost);
-  const lo = Math.log(Math.min(...costs, Infinity) + 0.001);
-  const hi = Math.log(Math.max(...costs, 0) + 0.001);
-  const heat = (c: number) => {
-    const p = hi > lo ? (Math.log(c + 0.001) - lo) / (hi - lo) : 0;
-    return `hsl(${Math.round(120 * (1 - Math.min(1, Math.max(0, p))))} 70% 38%)`;
+  const heatScale = (values: number[]) => {
+    const lo = Math.log(Math.min(...values, Infinity) + 0.001);
+    const hi = Math.log(Math.max(...values, 0) + 0.001);
+    return (c: number) => {
+      const p = hi > lo ? (Math.log(c + 0.001) - lo) / (hi - lo) : 0;
+      return `hsl(${Math.round(120 * (1 - Math.min(1, Math.max(0, p))))} 70% 38%)`;
+    };
   };
+  // Prompt level: each prompt against every other prompt in the session.
+  const heat = heatScale(d.turns.map((t) => t.cost));
   const turnEl = (t: SessionDetail['turns'][number], i: number) =>
     h(
       'details',
@@ -1078,7 +1081,25 @@ async function sessionView(token: number, id: string, day?: string) {
         h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
         h('b', { class: 'heat', style: { background: heat(t.cost) }, title: `${fmtUSD(t.cost)}: green is this session’s cheapest prompt, red its most expensive` }, fmtUSD(t.cost)),
       ),
-      table(t.requestIds.map((rid) => byId.get(rid)!.r), reqCols, { id: `turn:${t.promptId}`, onRow: (r) => open(r.id) }),
+      (() => {
+        // Request level: scaled within this prompt only, so its own priciest call is red.
+        const rows = t.requestIds.map((rid) => byId.get(rid)!.r);
+        const own = (r: RequestRow) => r.cost + (r.side ?? 0);
+        const reqHeat = heatScale(rows.filter((r) => r.priced !== false).map(own));
+        const cols = reqCols.map((c) =>
+          c.key !== 'cost'
+            ? c
+            : {
+                ...c,
+                sort: (r: RequestRow) => own(r),
+                cell: (r: RequestRow) =>
+                  r.priced === false
+                    ? h('span', { class: 'muted', title: 'No price on file for this model' }, '—')
+                    : h('span', { class: 'heat', style: { background: reqHeat(own(r)) }, title: `${fmtUSD(own(r))}: green is this prompt’s cheapest request, red its most expensive` }, fmtUSD(own(r))),
+              },
+        );
+        return table(rows, cols, { id: `turn:${t.promptId}`, onRow: (r) => open(r.id) });
+      })(),
     );
   let promptView = store.get('promptView', 'order') as 'order' | 'top';
   const turnsHolder = h('div');
@@ -1104,7 +1125,7 @@ async function sessionView(token: number, id: string, day?: string) {
   const heatKey = h(
     'div',
     { class: 'legend', style: { justifyContent: 'flex-end' } },
-    h('span', { class: 'muted' }, 'Prompt cost:'),
+    h('span', { class: 'muted', title: 'Prompts are colored against each other; the requests inside a prompt against each other' }, 'Cost, relative to its level:'),
     h('span', {}, 'lowest'),
     h('span', { style: { width: '90px', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg, hsl(120 70% 38%), hsl(60 70% 38%), hsl(0 70% 38%))' } }),
     h('span', {}, 'highest'),

@@ -1,11 +1,11 @@
 import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
-import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, TooltipComponent } from 'echarts/components';
+import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, MarkPointComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
-import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, RequestRow, UsageView } from './api';
+import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, ItemOrigin, RequestRole, RequestRow, UsageView } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
-echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
+echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, MarkPointComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
 
 /* ---------- theme from CSS custom properties ---------- */
 
@@ -54,6 +54,34 @@ export const CATEGORIES = [
   { key: 'thinking', label: 'Thinking', slot: 7, kinds: ['thinking'] },
   { key: 'unattributed', label: 'Not in transcript', slot: 0, kinds: ['unattributed'] },
 ] as const;
+
+/** Why a request happened. Same order everywhere: yours first, then what Claude did on its own. */
+export const ROLES: { key: RequestRole; label: string; short: string; slot: number; hint: string }[] = [
+  { key: 'prompt', label: 'Your prompt', short: 'your prompt', slot: 1, hint: 'The call your message started' },
+  { key: 'answer', label: 'Final answer', short: 'answer', slot: 3, hint: 'Claude’s reply to you: the last call of the turn, with no tool calls' },
+  { key: 'iteration', label: 'Claude iterating', short: 'iteration', slot: 4, hint: 'Claude calling the model again with tool results, to get your work done' },
+  { key: 'subagent', label: 'Subagent', short: 'subagent', slot: 7, hint: 'Work inside a subagent Claude launched' },
+  { key: 'auto', label: 'Automatic', short: 'automatic', slot: 0, hint: 'Started by Claude Code itself: a background task finishing, compaction' },
+];
+export const roleOf = (k: RequestRole) => ROLES.find((r) => r.key === k) ?? ROLES[ROLES.length - 1];
+export const roleColor = (k: RequestRole) => {
+  const r = roleOf(k);
+  return r.slot ? series(r.slot) : cssVar('--other');
+};
+
+/** Who put a line item into the context. */
+export const ORIGINS: { key: ItemOrigin; label: string; slot: number; hint: string }[] = [
+  { key: 'you', label: 'You', slot: 1, hint: 'What you typed or pasted' },
+  { key: 'claude', label: 'Claude', slot: 4, hint: 'Claude’s own text, thinking and tool calls' },
+  { key: 'tool', label: 'Tool output', slot: 2, hint: 'Results of the tools Claude ran' },
+  { key: 'subagent', label: 'Subagent results', slot: 7, hint: 'What subagents reported back' },
+  { key: 'system', label: 'Claude Code', slot: 0, hint: 'System prompt, tool definitions, reminders, and what the transcript does not show' },
+];
+export const originOf = (k: ItemOrigin) => ORIGINS.find((o) => o.key === k) ?? ORIGINS[ORIGINS.length - 1];
+export const originColor = (k: ItemOrigin) => {
+  const o = originOf(k);
+  return o.slot ? series(o.slot) : cssVar('--other');
+};
 
 export function categoryOf(kind: ItemKind) {
   return CATEGORIES.find((c) => (c.kinds as readonly string[]).includes(kind)) ?? CATEGORIES[CATEGORIES.length - 1];
@@ -449,6 +477,7 @@ export function compositionChart(el: HTMLElement, points: CompositionPoint[], mo
 /** Series colours for the dashboard view: products keep fixed slots; other groupings go by stable order. */
 export function usageColors(view: UsageView): string[] {
   const PRODUCT_SLOT: Record<string, number> = { claude_code: 1, chat: 2, cowork: 3, chrome: 4 };
+  if (view.group === 'role') return view.series.map((s) => roleColor(s.key as RequestRole));
   return view.series.map((s, i) => (view.group === 'product' ? series(PRODUCT_SLOT[s.key] ?? 8) : i < 8 ? series(i + 1) : cssVar('--other')));
 }
 
@@ -703,6 +732,10 @@ export interface TimelineOptions {
   /** Zoom window (percent of the thread) to restore, so live redraws keep where you were looking. */
   zoom?: { start: number; end: number };
   onZoom?: (z: { start: number; end: number }) => void;
+  /** 'kind': context by content kind, cost by token type. 'who': context by who put it there, cost by why the call happened. */
+  colorBy: 'kind' | 'who';
+  /** Cost of the subagents each request launched, drawn on top of that request's bar. */
+  launched?: Map<string, { cost: number; names: string[] }>;
 }
 
 /**
@@ -716,15 +749,24 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
   const byId = new Map(reqs.map((r) => [r.id, r]));
   const ids = points.map((p) => p.id);
   const pos = new Map(ids.map((id, i) => [id, i]));
-  const rows = points.map((p) => CATEGORIES.map((c) => (c.kinds as readonly ItemKind[]).reduce((a, k) => a + (p.byKind[k] ?? 0), 0)));
-  const present = CATEGORIES.map((_, ci) => rows.some((r) => r[ci] > 0));
+  const who = opts.colorBy === 'who';
+  const layers: { label: string; color: string }[] = who
+    ? ORIGINS.map((o) => ({ label: o.label, color: originColor(o.key) }))
+    : CATEGORIES.map((c) => ({ label: c.label, color: categoryColor(c) }));
+  const rows = points.map((p) =>
+    who ? ORIGINS.map((o) => p.byOrigin?.[o.key] ?? 0) : CATEGORIES.map((c) => (c.kinds as readonly ItemKind[]).reduce((a, k) => a + (p.byKind[k] ?? 0), 0)),
+  );
+  const present = layers.map((_, ci) => rows.some((r) => r[ci] > 0));
   const ctxVal = (i: number, ci: number) => (opts.mode === 'share' ? (points[i].total ? (rows[i][ci] / points[i].total) * 100 : 0) : rows[i][ci]);
   const partVal = (r: RequestRow | undefined, k: Part) => (!r ? 0 : k === 'side' ? r.side ?? 0 : r.costParts[k] ?? 0);
   const parts = PARTS.filter((p) => ids.some((id) => partVal(byId.get(id), p.key) > 0));
-  const totals = ids.map((id) => {
+  const own = (id: string) => {
     const r = byId.get(id);
     return r ? r.cost + (r.side ?? 0) : 0;
-  });
+  };
+  const launchedCost = (id: string) => opts.launched?.get(id)?.cost ?? 0;
+  const roles = ROLES.filter((ro) => reqs.some((r) => r.role === ro.key));
+  const totals = ids.map((id) => own(id) + launchedCost(id));
   // Typical scale: 1.5× the 95th percentile, so the everyday bars are readable; spikes are clipped, and listed.
   const sorted = [...totals].sort((a, b) => a - b);
   const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
@@ -735,7 +777,7 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
   const dense = ids.length > 150;
   const fmtCtx = (v: number) => (opts.mode === 'share' ? `${v.toFixed(0)}%` : fmtTokens(v));
 
-  const ctxSeries = CATEGORIES.map((c, ci) => ({ c, ci }))
+  const ctxSeries = layers.map((c, ci) => ({ c, ci }))
     .filter(({ ci }) => present[ci])
     .map(({ c, ci }, k) => ({
       name: c.label,
@@ -745,7 +787,7 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
       yAxisIndex: 0,
       symbol: 'none',
       lineStyle: { width: 1, color: surface },
-      areaStyle: { color: categoryColor(c), opacity: 0.9 },
+      areaStyle: { color: c.color, opacity: 0.9 },
       emphasis: { disabled: true },
       data: ids.map((_, i) => ctxVal(i, ci)),
       markLine:
@@ -753,17 +795,36 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
           ? { silent: true, symbol: 'none', lineStyle: { color: cssVar('--critical'), width: 1, type: 'solid' }, label: { formatter: `Context limit ${fmtTokens(limit)}`, color: cssVar('--text-secondary'), position: 'insideEndTop' }, data: [{ yAxis: limit }] }
           : undefined,
     }));
-  const costSeries = parts.map((p, k) => ({
-    name: p.label,
+  const bar = (name: string, color: string, data: number[]) => ({
+    name,
     type: 'bar',
     stack: 'cost',
     xAxisIndex: 1,
     yAxisIndex: 1,
     barMaxWidth: 24,
     barCategoryGap: dense ? '10%' : '30%',
-    data: ids.map((id) => partVal(byId.get(id), p.key)),
-    itemStyle: { color: series(p.slot), borderColor: surface, borderWidth: dense ? 0 : 1, borderRadius: k === parts.length - 1 ? [3, 3, 0, 0] : 0 },
-  }));
+    data,
+    itemStyle: { color, borderColor: surface, borderWidth: dense ? 0 : 1 },
+  });
+  const costSeries = who
+    ? roles.map((ro) => bar(ro.label, roleColor(ro.key), ids.map((id) => (byId.get(id)?.role === ro.key ? own(id) : 0))))
+    : parts.map((p) => bar(p.label, series(p.slot), ids.map((id) => partVal(byId.get(id), p.key))));
+  // Subagents launched from a main-thread request: their whole cost sits on top of the launching bar, hatched.
+  if (opts.launched?.size)
+    costSeries.push({
+      ...bar('Subagents launched', roleColor('subagent'), ids.map(launchedCost)),
+      itemStyle: { color: roleColor('subagent'), borderColor: surface, borderWidth: dense ? 0 : 1, opacity: 0.55 } as never,
+    });
+  const launchMarks = ids.flatMap((id, i) => (opts.launched?.has(id) ? [{ xAxis: i }] : []));
+  if (launchMarks.length && ctxSeries[0])
+    (ctxSeries[0] as Record<string, unknown>).markPoint = {
+      silent: true,
+      symbol: 'pin',
+      symbolSize: 18,
+      itemStyle: { color: roleColor('subagent') },
+      label: { show: false },
+      data: launchMarks.map((m) => ({ coord: [ids[m.xAxis], opts.mode === 'share' ? 100 : points[m.xAxis].total] })),
+    };
 
   const axisX = (i: number) => ({
     type: 'category',
@@ -813,18 +874,30 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
         const i = ps[0].dataIndex;
         const p = points[i];
         const r = byId.get(ids[i]);
-        const ctxRows = CATEGORIES.map((c, ci) => ({ c, ci }))
+        const ctxRows = layers.map((c, ci) => ({ c, ci }))
           .filter(({ ci }) => present[ci] && rows[i][ci] > 0)
           .reverse()
-          .map(({ c, ci }) => row(categoryColor(c), c.label, `${fmtTokens(rows[i][ci])} · ${p.total ? ((rows[i][ci] / p.total) * 100).toFixed(0) : 0}%`))
+          .map(({ c, ci }) => row(c.color, c.label, `${fmtTokens(rows[i][ci])} · ${p.total ? ((rows[i][ci] / p.total) * 100).toFixed(0) : 0}%`))
           .join('');
         const costRows = [...parts].reverse().map((pt) => row(series(pt.slot), pt.label, fmtUSD(partVal(r, pt.key)))).join('');
+        const l = opts.launched?.get(ids[i]);
+        const launchedRow = l ? row(roleColor('subagent'), `Subagents launched: ${esc(l.names.join(', '))}`, fmtUSD(l.cost)) : '';
+        const why = r ? roleOf(r.role) : undefined;
+        const whyText = r && why
+          ? r.role === 'iteration' && r.trigger?.length
+            ? `Claude iterating on ${esc(r.trigger.join(', '))} results`
+            : r.role === 'auto' && r.trigger?.length
+              ? `Automatic: ${esc(r.trigger.join(', '))}`
+              : why.label
+          : '';
         return (
           `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(p.ts)}${r ? ` · ${esc(r.model)}` : ''}</div>` +
+          (why ? `<div style="margin-bottom:4px"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${roleColor(r!.role)};margin-right:6px"></span>${whyText}</div>` : '') +
           `<div style="color:${cssVar('--text-muted')};margin:2px 0">In context: <b style="color:${cssVar('--text-primary')}">${fmtTokens(p.total)}</b></div>` +
           ctxRows +
           `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Cost: <b style="color:${cssVar('--text-primary')}">${fmtUSD(totals[i])}</b>${cap && totals[i] > cap ? ' (clipped on the chart)' : ''}</div>` +
           costRows +
+          launchedRow +
           `<div style="color:${cssVar('--text-muted')};margin-top:4px">${esc(r?.tools.join(', ') || 'no tool calls')} · click to open</div>`
         );
       },

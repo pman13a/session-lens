@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { writeFileAtomic } from './account.js';
 import { dirname, join } from 'node:path';
 import type { Store } from './store.js';
-import type { Request } from './types.js';
+import { ROLE_LABEL, type Request } from './types.js';
 
 export const PRODUCTS = [
   { key: 'claude_code', label: 'Claude Code' },
@@ -19,7 +19,7 @@ export const PRODUCTS = [
 ] as const;
 export type ProductKey = (typeof PRODUCTS)[number]['key'];
 
-export type GroupBy = 'product' | 'model' | 'project' | 'surface';
+export type GroupBy = 'product' | 'model' | 'project' | 'surface' | 'role';
 
 const SURFACES: Record<string, string> = {
   cli: 'Terminal',
@@ -181,6 +181,8 @@ function keyOf(store: Store, r: Request, group: GroupBy): { key: string; label: 
     }
     case 'surface':
       return { key: r.entrypoint ?? 'unknown', label: surfaceLabel(r.entrypoint) };
+    case 'role':
+      return { key: r.role, label: ROLE_LABEL[r.role] };
     default:
       return { key: 'claude_code', label: 'Claude Code' };
   }

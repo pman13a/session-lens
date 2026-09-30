@@ -53,6 +53,28 @@ Every view updates while Claude Code works, usually within half a second of a tr
 | Session | **What filled the context, and what each request cost**: two panels on one shared request axis, with context composition (tokens or % of context, against the limit) on top and that request's cost by component below. One crosshair, one zoom slider for both, one thread selector, and a *Typical* cost scale that caps rare spikes (listed, and shown in full on hover). Then **cost accumulated over the session** (running total, by request or by clock time; the steps show where a cold cache was rewritten), each prompt with the requests that answered it, and subagents | a request |
 | Request | Measured totals, a composition bar, a treemap and ranked table of every context line item, "added this turn" filter, prev/next, and the response's own blocks | an item, to read its raw text |
 
+## Your calls vs Claude's own
+
+One prompt from you usually turns into many API calls. Session Lens labels each call by why it happened. It does this by walking back from the call to the transcript record that caused it.
+
+| Role | What it means | How it's told |
+|---|---|---|
+| **Your prompt** | The call your message started | The call follows a message Claude Code tagged `origin: human` |
+| **Claude iterating** | Claude calling the model again, on its own, to act on tool results | The call follows tool results; the tools are named ("iterating on Bash, Read") |
+| **Final answer** | Claude's reply to you | An iteration that calls no tools: nothing is left to iterate on |
+| **Subagent** | Work inside a subagent Claude launched | The call is in `subagents/agent-*.jsonl`, linked to the request whose Agent/Task call launched it |
+| **Automatic** | Claude Code started it itself | A background task finishing (`task-notification`), compaction |
+
+Where it shows:
+
+- **Overview and session:** a "Who made the calls" split of cost and requests.
+- **Timeline:** a **By who** toggle. The context panel is split by who put each token there (you, Claude, tool output, subagent results, Claude Code). The cost bars are colored by role. Each subagent's whole cost sits on top of the request that launched it, with a pin marking the launch.
+- **Prompts list:** each prompt has a small split bar, and each request has a **Why** column.
+- **Request page:** a **Why this call** tile and a sentence linking to the subagents it launched, or to the request that launched it.
+- **Line items:** a **Who** column and filter.
+- **Sessions table:** "incl. $X in N subagents".
+- **Usage limits:** **Group by Who**.
+
 ## How the numbers are made
 
 - **Totals are measured.** Every request's `usage` block (input, cache read, cache write 5m/1h, output, thinking, web searches) comes straight from the transcript.

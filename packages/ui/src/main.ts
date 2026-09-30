@@ -1,6 +1,6 @@
 import './style.css';
-import { api, saveFile, subscribe, type AccountState, type BillingMode, type ConfigInfo, type PricingInfo, type PublishedCheck, type PriceRow, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
-import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextTreemap, cssVar, dailyChart, disposeAll, rangeAccumulationChart, sessionAccumulationChart, timelineChart, setAnimation, usageChart, usageColors } from './charts';
+import { api, saveFile, subscribe, type AccountState, type BillingMode, type ConfigInfo, type PricingInfo, type PublishedCheck, type PriceRow, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type RequestRole, type RoleSplit, type SessionDetail, type SessionRow, type Summary } from './api';
+import { CATEGORIES, ORIGINS, ROLES, categoryColor, categoryOf, originColor, originOf, roleColor, roleOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextTreemap, cssVar, dailyChart, disposeAll, rangeAccumulationChart, sessionAccumulationChart, timelineChart, setAnimation, usageChart, usageColors } from './charts';
 import { daysAgo, isoDay, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
 /* ---------- tiny DOM helper: text always goes in as textContent ---------- */
@@ -140,7 +140,7 @@ function swap(...nodes: Node[]) {
 const tableState = new Map<string, { sortKey?: string; desc: boolean; limit: number }>();
 let tableSeq = 0;
 const openTurns = new Map<string, Set<number>>();
-const requestUi = new Map<string, { filter: 'all' | 'added'; category: string }>();
+const requestUi = new Map<string, { filter: 'all' | 'added'; category: string; origin?: string }>();
 const compThread = new Map<string, string>();
 const viewKey = () => location.hash || '#/';
 
@@ -323,6 +323,36 @@ function spark(values: number[], w = 90, hgt = 22) {
 function meter(pct: number) {
   const cls = pct >= 0.9 ? 'meter crit' : pct >= 0.7 ? 'meter warn' : 'meter';
   return h('span', {}, h('span', { class: cls }, h('div', { style: { width: `${Math.min(pct, 1) * 100}%` } })), fmtPct(pct));
+}
+
+/** "Your prompt" / "Claude iterating on Bash" / "Subagent" …, with its color key. */
+function rolePill(r: { role: RequestRole; trigger?: string[] }, long = false) {
+  const ro = roleOf(r.role);
+  const text =
+    long && r.role === 'iteration' && r.trigger?.length
+      ? `Claude iterating on ${r.trigger.join(', ')}`
+      : long && r.role === 'auto' && r.trigger?.length
+        ? `Automatic: ${r.trigger.join(', ')}`
+        : ro.label;
+  return h('span', { title: ro.hint + (r.trigger?.length ? ` (after ${r.trigger.join(', ')})` : ''), style: { whiteSpace: 'nowrap' } }, h('span', { class: 'key', style: { background: roleColor(r.role) } }), text);
+}
+
+/** One stacked bar of who drove the cost, plus its legend with dollars and shares. */
+function roleSplitBar(split: RoleSplit, opts: { compact?: boolean } = {}) {
+  const rows = ROLES.map((ro) => ({ ro, v: split[ro.key] })).filter((x) => x.v && (x.v.cost > 0 || x.v.requests > 0));
+  const total = rows.reduce((a, x) => a + x.v!.cost, 0);
+  const bar = h(
+    'div',
+    { style: { display: 'flex', height: opts.compact ? '8px' : '14px', borderRadius: '4px', overflow: 'hidden', gap: '2px', margin: '6px 0 4px', minWidth: '120px' }, role: 'img', 'aria-label': 'Cost by who made the call' },
+    ...rows.map((x) => h('div', { title: `${x.ro.label}: ${fmtUSD(x.v!.cost)} · ${x.v!.requests} requests`, style: { flex: `${x.v!.cost || 0.0001} 0 0`, background: roleColor(x.ro.key), minWidth: '2px' } })),
+  );
+  if (opts.compact) return bar;
+  return h(
+    'div',
+    {},
+    bar,
+    h('div', { class: 'legend' }, ...rows.map((x) => h('span', { title: x.ro.hint }, h('i', { style: { background: roleColor(x.ro.key) } }), `${x.ro.label} ${fmtUSD(x.v!.cost)} (${fmtPct(total ? x.v!.cost / total : 0)}) · ${x.v!.requests} req`))),
+  );
 }
 
 function barCell(value: number, max: number, text: string, color = cssVar('--series-1')) {
@@ -712,6 +742,15 @@ async function overview(token: number) {
   );
   const live = liveCard(sum.live);
   if (live) kids.splice(1, 0, live);
+  if (Object.keys(sum.byRole ?? {}).length)
+    kids.push(
+      card(
+        'Who made the calls',
+        'Your prompts and Claude’s replies to you, against the calls Claude made on its own (iterating on tool results), subagents, and calls Claude Code started itself.',
+        [h('a', { class: 'btn', href: '#/usage', onclick: () => ((usageState.group = 'role'), store.set('u.group', 'role')) }, 'Over time')],
+        roleSplitBar(sum.byRole),
+      ),
+    );
   kids.push(sessionsCard(sess.sessions, 'Sessions in range', undefined));
   swap(...(kids.filter(Boolean) as Node[]));
   dailyChart(chartEl, sum.days, state.dailyMode, (day) => go(`#/day/${day}`));
@@ -748,7 +787,22 @@ function sessionsCard(rows: SessionRow[], title: string, day: string | undefined
         { key: 'peak', label: 'Peak context', num: true, sort: (r) => r.peakContextPct, cell: (r) => h('span', { title: `${fmtInt(r.peakContext)} tokens` }, meter(r.peakContextPct)) },
         { key: 'tokens', label: 'Tokens in / out', num: true, sort: (r) => r.input + r.cacheRead + r.cacheWrite, cell: (r) => `${fmtTokens(r.input + r.cacheRead + r.cacheWrite)} / ${fmtTokens(r.output)}` },
         { key: 'start', label: 'Started', num: true, sort: (r) => r.firstTs, cell: (r) => fmtTime(r.firstTs) },
-        { key: 'cost', label: costWord(), num: true, sort: (r) => r.cost, cell: (r) => barCell(r.cost, maxCost, fmtUSD(r.cost)) },
+        {
+          key: 'cost',
+          label: costWord(),
+          num: true,
+          sort: (r) => r.cost,
+          cell: (r) => {
+            const sub = r.byRole?.subagent;
+            const mine = (r.byRole?.prompt?.cost ?? 0) + (r.byRole?.answer?.cost ?? 0);
+            return h(
+              'div',
+              { title: `Your prompts and answers ${fmtUSD(mine)} · Claude iterating ${fmtUSD(r.byRole?.iteration?.cost ?? 0)}${sub ? ` · subagents ${fmtUSD(sub.cost)}` : ''}` },
+              barCell(r.cost, maxCost, fmtUSD(r.cost)),
+              sub && sub.cost > 0 ? h('div', { class: 'muted', style: { fontSize: '11px' } }, `incl. ${fmtUSD(sub.cost)} in ${r.subagents} subagent${r.subagents === 1 ? '' : 's'}`) : null,
+            );
+          },
+        },
       ],
       { id: 'sessions', onRow: (r) => go(`#/session/${encodeURIComponent(r.id)}${q}`), initial: 'cost', limit: 50 },
     ),
@@ -827,7 +881,17 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   let thread = compThread.get(d.session.id) ?? '';
   let mode = store.get('compMode', 'tokens') as 'tokens' | 'share';
   let costScale = store.get('costScale', 'typical') as 'full' | 'typical';
+  let colorBy = store.get('colorBy', 'kind') as 'kind' | 'who';
   const legendHolder = h('div');
+  // Subagent cost, drawn on the main-thread request that launched it.
+  const launched = new Map<string, { cost: number; names: string[] }>();
+  for (const a of d.subagents) {
+    if (!a.launchedBy) continue;
+    const e = launched.get(a.launchedBy) ?? { cost: 0, names: [] };
+    e.cost += a.cost;
+    e.names.push(a.agentType ?? 'agent');
+    launched.set(a.launchedBy, e);
+  }
   const note = h('div', { class: 'muted', style: { fontSize: '12px', minHeight: '16px' } });
   const zoomKey = () => `${d.session.id}:${thread}`;
   const draw = () => {
@@ -837,9 +901,15 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     const parts = [...COMPONENTS, SIDE_COMPONENT].filter((c) =>
       threadReqs.some((r) => (c.key === 'side' ? r.side ?? 0 : (r.costParts as unknown as Record<string, number>)[c.key] ?? 0) > 0),
     );
+    const threadLaunched = thread ? undefined : launched;
+    const launchedKey = threadLaunched?.size ? [h('span', { title: 'Each subagent’s whole cost, on the request that launched it; the pin on the context panel marks the launch' }, h('i', { style: { background: roleColor('subagent'), opacity: '0.55' } }), 'Subagents launched')] : [];
     legendHolder.replaceChildren(
-      h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Context:'), ...present.map((c) => h('span', {}, h('i', { style: { background: categoryColor(c) } }), c.label))),
-      h('div', { class: 'legend' }, h('span', { class: 'muted' }, `${costWord()}:`), ...parts.map((c) => h('span', {}, h('i', { style: { background: cssVar(`--series-${c.slot}`) } }), c.label))),
+      colorBy === 'who'
+        ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Context, put there by:'), ...ORIGINS.filter((o) => pts.some((p) => (p.byOrigin?.[o.key] ?? 0) > 0)).map((o) => h('span', { title: o.hint }, h('i', { style: { background: originColor(o.key) } }), o.label)))
+        : h('div', { class: 'legend' }, h('span', { class: 'muted' }, 'Context:'), ...present.map((c) => h('span', {}, h('i', { style: { background: categoryColor(c) } }), c.label))),
+      colorBy === 'who'
+        ? h('div', { class: 'legend' }, h('span', { class: 'muted' }, `${costWord()}, by why the call happened:`), ...ROLES.filter((ro) => threadReqs.some((r) => r.role === ro.key)).map((ro) => h('span', { title: ro.hint }, h('i', { style: { background: roleColor(ro.key) } }), ro.label)), ...launchedKey)
+        : h('div', { class: 'legend' }, h('span', { class: 'muted' }, `${costWord()}:`), ...parts.map((c) => h('span', {}, h('i', { style: { background: cssVar(`--series-${c.slot}`) } }), c.label)), ...launchedKey),
     );
     const old = (chartEl as unknown as { _chart?: { dispose(): void } })._chart;
     old?.dispose();
@@ -847,7 +917,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
       chartEl.replaceChildren(h('div', { class: 'empty' }, 'No requests on this thread'));
       return;
     }
-    const res = timelineChart(chartEl, pts, threadReqs, { mode, costScale, zoom: timelineZoom.get(zoomKey()), onZoom: (z) => timelineZoom.set(zoomKey(), z) }, open);
+    const res = timelineChart(chartEl, pts, threadReqs, { mode, costScale, colorBy, launched: threadLaunched, zoom: timelineZoom.get(zoomKey()), onZoom: (z) => timelineZoom.set(zoomKey(), z) }, open);
     (chartEl as unknown as { _chart?: unknown })._chart = res.chart;
     note.textContent = res.cap && res.clipped.length
       ? `Cost axis capped at ${fmtUSD(res.cap)} so everyday requests are readable. Above it: ${res.clipped.slice(0, 6).map((c) => `#${c.n} ${fmtUSD(c.cost)}`).join(', ')}${res.clipped.length > 6 ? ` and ${res.clipped.length - 6} more` : ''}. Hover shows the real value.`
@@ -880,7 +950,21 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     },
   );
   scaleSeg.title = 'Cost axis: Typical caps rare spikes so everyday requests are readable';
-  const actions: Node[] = [modeSeg, scaleSeg];
+  const colorSeg = seg(
+    [
+      { key: 'kind', label: 'By content' },
+      { key: 'who', label: 'By who' },
+    ],
+    colorBy,
+    (k) => {
+      colorBy = k;
+      store.set('colorBy', k);
+      colorSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'kind' : 'who') === k)));
+      draw();
+    },
+  );
+  colorSeg.title = 'By who: your prompts vs Claude iterating on tool results vs subagents';
+  const actions: Node[] = [colorSeg, modeSeg, scaleSeg];
   if (d.subagents.length)
     actions.unshift(
       h(
@@ -909,6 +993,31 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   return el;
 }
 
+/** Who drove this session's cost: your prompts, Claude's own iterations, subagents, automatic calls. */
+function whoCard(d: SessionDetail): Node {
+  const split = d.session.byRole;
+  const it = split.iteration;
+  const mine = (split.prompt?.requests ?? 0) + (split.answer?.requests ?? 0);
+  const perPrompt = d.turns.length ? (it?.requests ?? 0) / d.turns.length : 0;
+  const rows = ROLES.map((ro) => ({ ro, v: split[ro.key] })).filter((x) => x.v);
+  const total = rows.reduce((a, x) => a + x.v!.cost, 0);
+  return card(
+    'Who made the calls',
+    `${fmtInt(mine)} calls answered you directly (your prompt, or the final reply). Claude made ${fmtInt(it?.requests ?? 0)} more on its own, working through tool results: about ${perPrompt.toFixed(1)} per prompt.` +
+      (split.subagent ? ` Subagents made ${fmtInt(split.subagent.requests)}.` : ''),
+    [],
+    roleSplitBar(split),
+    table(rows, [
+      { key: 'role', label: 'Why the call happened', cell: (x) => h('div', {}, rolePill({ role: x.ro.key }), h('div', { class: 'muted', style: { fontSize: '11px' } }, x.ro.hint)) },
+      { key: 'req', label: 'Requests', num: true, sort: (x) => x.v!.requests, cell: (x) => fmtInt(x.v!.requests) },
+      { key: 'out', label: 'Output', num: true, sort: (x) => x.v!.output, cell: (x) => fmtTokens(x.v!.output) },
+      { key: 'avg', label: 'Per request', num: true, sort: (x) => x.v!.cost / x.v!.requests, cell: (x) => fmtUSD(x.v!.cost / Math.max(1, x.v!.requests)) },
+      { key: 'share', label: 'Share', num: true, sort: (x) => x.v!.cost, cell: (x) => fmtPct(total ? x.v!.cost / total : 0) },
+      { key: 'cost', label: costWord(), num: true, sort: (x) => x.v!.cost, cell: (x) => barCell(x.v!.cost, Math.max(...rows.map((y) => y.v!.cost)), fmtUSD(x.v!.cost), roleColor(x.ro.key)) },
+    ], { id: 'who', initial: 'cost' }),
+  );
+}
+
 async function sessionView(token: number, id: string, day?: string) {
   const [d, comp] = await Promise.all([api<SessionDetail>('session', { id }), api<{ points: CompositionPoint[] }>('composition', { id })]);
   if (token !== renderToken) return;
@@ -924,10 +1033,11 @@ async function sessionView(token: number, id: string, day?: string) {
     { read: 0, write: 0, input: 0, out: 0 },
   );
   const byId = new Map(reqs.map((r, i) => [r.id, { r, n: i + 1 }]));
+  const mainIds = reqs.filter((r) => !r.agentId).map((r) => r.id);
   const reqCols: Col<RequestRow>[] = [
     { key: 'n', label: '#', num: true, cell: (r) => byId.get(r.id)!.n },
     { key: 'time', label: 'Time', cell: (r) => fmtTime(r.ts) },
-    { key: 'who', label: 'Thread', cell: (r) => (r.agentId ? h('span', { class: 'pill' }, 'subagent') : h('span', { class: 'muted' }, 'main')) },
+    { key: 'who', label: 'Why', sort: (r) => ROLES.findIndex((x) => x.key === r.role), cell: (r) => rolePill(r, true) },
     { key: 'model', label: 'Model', cell: (r) => h('span', { class: 'muted' }, r.model) },
     { key: 'tools', label: 'Tool calls', cell: (r) => h('span', { class: 'muted' }, r.tools.join(', ') || '—') },
     { key: 'ctx', label: 'In context', num: true, cell: (r) => fmtTokens(r.contextTokens) },
@@ -954,6 +1064,7 @@ async function sessionView(token: number, id: string, day?: string) {
         h('span', { class: 'muted' }, String(i + 1)),
         h('span', { class: 't', title: t.text }, t.text),
         h('span', { class: 'muted' }, `${t.requestIds.length} req`),
+        h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
         h('b', {}, fmtUSD(t.cost)),
       ),
       table(t.requestIds.map((rid) => byId.get(rid)!.r), reqCols, { id: `turn:${t.promptId}`, onRow: (r) => open(r.id) }),
@@ -978,13 +1089,14 @@ async function sessionView(token: number, id: string, day?: string) {
       tile('Peak context', peak ? fmtTokens(peak.contextTokens) : '—', peak ? `${fmtPct(peak.contextTokens / peak.contextLimit)} of ${fmtTokens(peak.contextLimit)}` : ''),
       tile('Cache read / write', `${fmtTokens(u.read)} / ${fmtTokens(u.write)}`, `${fmtTokens(u.out)} output`),
     ),
+    whoCard(d),
     timelineCard(comp.points, reqs, d, open),
     accumulationCard(reqs, open),
     card(
       'Prompts',
-      'Each prompt with the requests that answered it (subagent work is grouped under the prompt that launched it)',
+      'Each prompt with the requests that answered it (subagent work is grouped under the prompt that launched it). The bar splits each prompt’s cost by who made the calls.',
       exportButtons(`session-${s.id.slice(0, 8)}-requests`, () =>
-        reqs.map((r, i) => ({ n: i + 1, id: r.id, time: new Date(r.ts).toISOString(), thread: r.agentId ?? 'main', model: r.model, tools: r.tools.join(' '), contextTokens: r.contextTokens, ...r.usage, cost: r.cost })),
+        reqs.map((r, i) => ({ n: i + 1, id: r.id, time: new Date(r.ts).toISOString(), thread: r.agentId ?? 'main', role: r.role, trigger: (r.trigger ?? []).join(' '), model: r.model, tools: r.tools.join(' '), contextTokens: r.contextTokens, ...r.usage, cost: r.cost })),
       ),
       ...turns,
     ),
@@ -998,6 +1110,14 @@ async function sessionView(token: number, id: string, day?: string) {
         table(d.subagents, [
           { key: 'type', label: 'Type', cell: (a) => a.agentType ?? 'agent' },
           { key: 'desc', label: 'Task', cell: (a) => a.description ?? a.agentId },
+          {
+            key: 'from',
+            label: 'Launched by',
+            cell: (a) => {
+              const n = a.launchedBy ? mainIds.indexOf(a.launchedBy) + 1 : 0;
+              return n ? h('a', { href: '#', onclick: (e: Event) => (e.preventDefault(), e.stopPropagation(), open(a.launchedBy!)) }, `main request #${n}`) : h('span', { class: 'muted' }, '—');
+            },
+          },
           { key: 'model', label: 'Model', cell: (a) => h('span', { class: 'muted' }, a.model ?? '') },
           { key: 'req', label: 'Requests', num: true, cell: (a) => a.requests },
           { key: 'cost', label: costWord(), num: true, cell: (a) => fmtUSD(a.cost) },
@@ -1030,11 +1150,39 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
     { label: `${r.agentId ? 'Subagent request' : 'Request'} ${d.thread.index + 1} of ${d.thread.count}` },
   ]);
 
-  const ui = requestUi.get(r.id) ?? { filter: 'all' as const, category: '' };
+  const ui = requestUi.get(r.id) ?? { filter: 'all' as const, category: '', origin: '' };
   requestUi.set(r.id, ui);
   let filter: 'all' | 'added' = ui.filter;
   let category = ui.category;
+  let originF = ui.origin ?? '';
   const total = a.measuredInput;
+  const byOrigin = ORIGINS.map((o) => ({ o, tokens: a.items.filter((i) => i.origin === o.key).reduce((x, i) => x + i.tokens, 0) })).filter((x) => x.tokens > 0);
+  const originBar = h(
+    'div',
+    { style: { display: 'flex', height: '14px', borderRadius: '4px', overflow: 'hidden', gap: '2px', margin: '6px 0 4px' }, role: 'img', 'aria-label': 'Context by who put it there' },
+    ...byOrigin.map((x) => h('div', { title: `${x.o.label}: ${fmtTokens(x.tokens)}`, style: { flex: `${x.tokens} 0 0`, background: originColor(x.o.key), minWidth: '2px' } })),
+  );
+  const originLegend = h(
+    'div',
+    { class: 'legend' },
+    h('span', { class: 'muted' }, 'Put there by:'),
+    ...byOrigin.map((x) => h('span', { title: x.o.hint }, h('i', { style: { background: originColor(x.o.key) } }), `${x.o.label} ${fmtTokens(x.tokens)} (${fmtPct(x.tokens / total)})`)),
+  );
+  const reqLink = (rid: string, text: string) => h('a', { href: reqHref(rid) }, text);
+  const whyParts: Child[] = [];
+  if (r.subagent) {
+    whyParts.push(`Inside the ${r.subagent.agentType ?? 'agent'} subagent${r.subagent.description ? ` “${r.subagent.description}”` : ''}. `);
+    if (r.subagent.launchedBy) whyParts.push(reqLink(r.subagent.launchedBy, 'Open the request that launched it'), '.');
+  } else if (r.role === 'prompt') whyParts.push('Your message started this call.');
+  else if (r.role === 'answer') whyParts.push('Claude’s reply to you: the last call of the turn, with no more tool calls.');
+  else if (r.role === 'iteration') whyParts.push(`Claude called the model again on its own, to act on the results of ${r.trigger?.join(', ') || 'its tool calls'}.`);
+  else whyParts.push(`Claude Code started this call itself${r.trigger?.length ? ` (${r.trigger.join(', ')})` : ''}, not you.`);
+  if (r.launched.length)
+    whyParts.push(
+      ' It launched ',
+      ...r.launched.flatMap((x, k) => [k ? ', ' : '', x.firstRequestId ? reqLink(x.firstRequestId, `${x.agentType ?? 'agent'}${x.description ? ` (${x.description})` : ''}`) : x.agentType ?? 'agent', ` ${fmtUSD(x.cost)} over ${x.requests} requests`]),
+      '.',
+    );
   const byCat = CATEGORIES.map((c) => ({ c, tokens: a.items.filter((i) => categoryOf(i.kind).key === c.key).reduce((s, i) => s + i.tokens, 0) })).filter((x) => x.tokens > 0);
 
   // 100% composition bar (HTML): every category, labelled in the legend beneath it.
@@ -1053,7 +1201,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
   const itemsHolder = h('div');
   const maxTok = Math.max(...a.items.map((i) => i.tokens), 0);
   const drawItems = () => {
-    const rows = a.items.filter((i) => (filter === 'all' || i.added) && (!category || categoryOf(i.kind).key === category));
+    const rows = a.items.filter((i) => (filter === 'all' || i.added) && (!category || categoryOf(i.kind).key === category) && (!originF || i.origin === originF));
     itemsHolder.replaceChildren(
       table(
         rows,
@@ -1064,6 +1212,12 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
             label: 'Kind',
             sort: (i) => categoryOf(i.kind).label,
             cell: (i) => h('span', {}, h('span', { class: 'key', style: { background: categoryColor(categoryOf(i.kind)) } }), categoryOf(i.kind).label),
+          },
+          {
+            key: 'origin',
+            label: 'Who',
+            sort: (i) => ORIGINS.findIndex((o) => o.key === i.origin),
+            cell: (i) => h('span', { title: originOf(i.origin).hint, style: { whiteSpace: 'nowrap' } }, h('span', { class: 'key', style: { background: originColor(i.origin) } }), originOf(i.origin).label),
           },
           { key: 'label', label: 'Item', sort: (i) => i.label, cls: 'title', cell: (i) => h('div', {}, h('span', { class: 't', title: i.label }, i.label), i.detail ? h('span', { class: 'muted t', title: i.detail }, i.detail) : null) },
           { key: 'added', label: '', cell: (i) => (i.added && d.thread.index > 0 ? h('span', { class: 'pill new' }, 'new') : null) },
@@ -1103,6 +1257,19 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
     h('option', { value: '' }, 'All kinds'),
     ...byCat.map((x) => h('option', { value: x.c.key, selected: x.c.key === category ? 'selected' : null }, x.c.label)),
   );
+  const originSel = h(
+    'select',
+    {
+      'aria-label': 'Who',
+      onchange: (e: Event) => {
+        originF = (e.target as HTMLSelectElement).value;
+        ui.origin = originF;
+        drawItems();
+      },
+    },
+    h('option', { value: '' }, 'Everyone'),
+    ...byOrigin.map((x) => h('option', { value: x.o.key, selected: x.o.key === originF ? 'selected' : null }, `Put there by: ${x.o.label}`)),
+  );
   let tree: ReturnType<typeof contextTreemap> | undefined;
   const disposeTree = () => tree?.dispose();
 
@@ -1119,6 +1286,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
       'div',
       { class: 'tiles' },
       tile('In context', fmtTokens(total), `${fmtPct(total / r.contextLimit)} of ${fmtTokens(r.contextLimit)} · measured`, true),
+      tile('Why this call', roleOf(r.role).short.replace(/^./, (c) => c.toUpperCase()), r.role === 'iteration' && r.trigger?.length ? `after ${r.trigger.join(', ')}` : r.launched.length ? `launched ${r.launched.length} subagent${r.launched.length === 1 ? '' : 's'}` : roleOf(r.role).hint),
       tile('Added this turn', fmtTokens(a.addedTokens), d.thread.index ? 'new since the previous request' : 'first request of this thread'),
       tile('Cache read / write', `${fmtTokens(r.usage.cacheRead)} / ${fmtTokens(r.usage.cacheWrite5m + r.usage.cacheWrite1h)}`, `${fmtTokens(r.usage.input)} uncached`),
       tile('Output', fmtTokens(r.usage.output), r.usage.thinking ? `${fmtTokens(r.usage.thinking)} thinking` : r.stopReason ? `stop: ${r.stopReason}` : ''),
@@ -1131,11 +1299,12 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
         `"System prompt + tools" (${fmtTokens(a.baselineTokens)}) is measured once on the thread's first request. ` +
         (a.unattributedTokens ? `"Not in transcript" (${fmtTokens(a.unattributedTokens)}) is context growth no transcript line explains, usually tool schemas loaded mid-session.` : ''),
     ),
-    card('What was in the context', `${a.items.length} line items`, [nav], compBar, compLegend, treeEl),
+    h('div', { class: 'note' }, h('span', { class: 'key', style: { background: roleColor(r.role) } }), ...whyParts),
+    card('What was in the context', `${a.items.length} line items`, [nav], compBar, compLegend, originBar, originLegend, treeEl),
     card(
       'Line items',
       'Click a row to read its content',
-      [filterSeg, catSel, ...exportButtons(`request-${r.id}-context`, () => a.items.map((i) => ({ position: a.items.indexOf(i), kind: i.kind, category: categoryOf(i.kind).label, label: i.label, detail: i.detail ?? '', chars: i.chars, tokens: i.tokens, addedThisTurn: i.added, addedAt: i.uuid ? new Date(i.ts).toISOString() : '' })))],
+      [filterSeg, catSel, originSel, ...exportButtons(`request-${r.id}-context`, () => a.items.map((i) => ({ position: a.items.indexOf(i), who: i.origin, kind: i.kind, category: categoryOf(i.kind).label, label: i.label, detail: i.detail ?? '', chars: i.chars, tokens: i.tokens, addedThisTurn: i.added, addedAt: i.uuid ? new Date(i.ts).toISOString() : '' })))],
       itemsHolder,
     ),
     card(
@@ -1308,6 +1477,7 @@ async function usageLimitsView(token: number) {
         ['model', 'Model'],
         ['project', 'Project'],
         ['surface', 'Surface'],
+        ['role', 'Who (you / Claude / subagents)'],
       ] as const
     ).map(([k, l]) => h('option', { value: k, selected: usageState.group === k ? 'selected' : null }, `Group by ${l}`)),
   );
@@ -1354,7 +1524,7 @@ async function usageLimitsView(token: number) {
   );
 
   /* chart */
-  const noun = { product: 'product', model: 'model', project: 'project', surface: 'surface' }[v.group];
+  const noun = { product: 'product', model: 'model', project: 'project', surface: 'surface', role: 'kind of call' }[v.group];
   const colors = usageColors(v);
   const chartEl = h('div', { class: 'chart' });
   const hasRefDays = Object.keys(v.reference.days).length > 0;
@@ -1850,6 +2020,7 @@ async function render(opts: { soft?: boolean } = {}) {
     else if (route.view === 'settings') await settingsView(token);
     else await requestView(token, route.id!, route.params);
   } catch (e) {
+    console.error(e);
     if (token === renderToken) swap(h('div', { class: 'empty err' }, `Could not load: ${String(e)}`));
   } finally {
     if (token === renderToken) {

@@ -1,5 +1,5 @@
 import type { Store } from './store.js';
-import type { ContentPiece, ItemKind, Rec, Request } from './types.js';
+import type { ContentPiece, ItemKind, ItemOrigin, Rec, Request } from './types.js';
 
 export interface ContextItem {
   /** `<record uuid>:<block>` — stable across requests, used for diffs and raw lookups. */
@@ -16,6 +16,27 @@ export interface ContextItem {
   added: boolean;
   ts: number;
   toolName?: string;
+  /** Who put it there: you, Claude, a tool, a subagent's result, or Claude Code itself. */
+  origin: ItemOrigin;
+}
+
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
+
+export function originOf(kind: ItemKind, rec: Pick<Rec, 'isHuman' | 'type'> | undefined, toolName?: string): ItemOrigin {
+  switch (kind) {
+    case 'prompt':
+      return 'you';
+    case 'text':
+    case 'thinking':
+    case 'tool_use':
+      return 'claude';
+    case 'tool_result':
+      return toolName && SUBAGENT_TOOLS.has(toolName) ? 'subagent' : 'tool';
+    case 'image':
+      return rec?.isHuman ? 'you' : 'tool';
+    default:
+      return 'system';
+  }
 }
 
 export interface OutputItem {
@@ -95,7 +116,13 @@ export interface ThreadProfile {
   index: Map<string, number>;
 }
 
-const profiles = new Map<string, ThreadProfile>();
+const profileCache = new WeakMap<Store, Map<string, ThreadProfile>>();
+/** Caches live per store (two stores can both be at version 1) and are dropped when the version moves on. */
+function cacheFor<T>(all: WeakMap<Store, Map<string, T>>, store: Store) {
+  let m = all.get(store);
+  if (!m) all.set(store, (m = new Map()));
+  return m;
+}
 
 /**
  * Per-thread calibration.
@@ -109,6 +136,7 @@ const profiles = new Map<string, ThreadProfile>();
 export function threadProfile(store: Store, req: Request): ThreadProfile {
   const thread = threadRequests(store, req);
   const key = `${store.version}:${req.sessionId}:${req.agentId ?? ''}`;
+  const profiles = cacheFor(profileCache, store);
   const hit = profiles.get(key);
   if (hit && hit.index.has(req.id)) return hit;
   const steps: Step[] = thread.map((r, i) => {
@@ -171,6 +199,7 @@ export function attribute(store: Store, requestId: string, opts: { diff?: boolea
       tokens: baseline,
       added: pos === 0,
       ts: prof.steps[0]?.ts ?? req.ts,
+      origin: 'system',
     },
   ];
 
@@ -201,6 +230,7 @@ export function attribute(store: Store, requestId: string, opts: { diff?: boolea
         tokens: namedAlloc[i],
         added: n.step.id === req.id,
         ts: n.step.ts,
+        origin: 'system',
       });
     });
     const rest = unattributed - namedAlloc.reduce((a, b) => a + b, 0);
@@ -216,6 +246,7 @@ export function attribute(store: Store, requestId: string, opts: { diff?: boolea
         tokens: rest,
         added: pos === 0,
         ts: req.ts,
+        origin: 'system',
       });
   }
 
@@ -233,6 +264,7 @@ export function attribute(store: Store, requestId: string, opts: { diff?: boolea
       added: prevStep ? !prevIds.has(id) : true,
       ts: rec.ts,
       toolName: piece.toolName,
+      origin: originOf(piece.kind, rec, piece.toolName),
     });
   });
 
@@ -281,13 +313,17 @@ export interface CompositionPoint {
   contextLimit: number;
   /** Measured input split by item kind; always sums to `total`. */
   byKind: Partial<Record<ItemKind, number>>;
+  /** The same total split by who put it there. */
+  byOrigin: Partial<Record<ItemOrigin, number>>;
+  role: Request['role'];
 }
 
-const compositions = new Map<string, CompositionPoint[]>();
+const compositionCache = new WeakMap<Store, Map<string, CompositionPoint[]>>();
 
 /** What filled the context on every request of a session (main thread and subagents). */
 export function sessionComposition(store: Store, sessionId: string): CompositionPoint[] {
   const key = `${store.version}:${sessionId}`;
+  const compositions = cacheFor(compositionCache, store);
   const hit = compositions.get(key);
   if (hit) return hit;
   const s = store.sessions.get(sessionId);
@@ -297,8 +333,12 @@ export function sessionComposition(store: Store, sessionId: string): Composition
     const a = attribute(store, req.id, { diff: false });
     if (!a) continue;
     const byKind: Partial<Record<ItemKind, number>> = {};
-    for (const i of a.items) byKind[i.kind] = (byKind[i.kind] ?? 0) + i.tokens;
-    out.push({ id: req.id, ts: req.ts, agentId: req.agentId, total: a.measuredInput, contextLimit: req.contextLimit, byKind });
+    const byOrigin: Partial<Record<ItemOrigin, number>> = {};
+    for (const i of a.items) {
+      byKind[i.kind] = (byKind[i.kind] ?? 0) + i.tokens;
+      byOrigin[i.origin] = (byOrigin[i.origin] ?? 0) + i.tokens;
+    }
+    out.push({ id: req.id, ts: req.ts, agentId: req.agentId, total: a.measuredInput, contextLimit: req.contextLimit, byKind, byOrigin, role: req.role });
   }
   for (const k of compositions.keys()) if (!k.startsWith(`${store.version}:`)) compositions.delete(k);
   compositions.set(key, out);

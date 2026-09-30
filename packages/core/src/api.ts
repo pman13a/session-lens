@@ -6,7 +6,7 @@ import { comparePrices, fetchPublishedPricing, type PublishedModel } from './pub
 import { parseDailyPaste, referencePath, saveReference, usageView, type GroupBy } from './usage.js';
 import type { Store } from './store.js';
 import type { Settings } from './types.js';
-import type { Request, Session } from './types.js';
+import type { Request, RequestRole, Session } from './types.js';
 
 export interface DayRow {
   day: string;
@@ -43,6 +43,22 @@ export interface SessionRow {
   peakContextPct: number;
   /** Context size per main-thread request, for a sparkline. */
   spark: number[];
+  /** Requests and cost by why they happened: your prompts, Claude's iterations, subagents… */
+  byRole: RoleSplit;
+}
+
+export type RoleSplit = Partial<Record<RequestRole, { requests: number; cost: number; output: number }>>;
+
+/** Split requests by role. Side calls go with the request they were spread over. */
+export function roleSplit(reqs: Request[]): RoleSplit {
+  const out: RoleSplit = {};
+  for (const r of reqs) {
+    const e = (out[r.role] ??= { requests: 0, cost: 0, output: 0 });
+    e.requests++;
+    e.cost += r.cost + r.side;
+    e.output += r.usage.output;
+  }
+  return out;
 }
 
 export interface Query {
@@ -133,6 +149,7 @@ export class Api {
       unknownModels: [...new Set(all.filter((r) => !r.priced).map((r) => r.model))],
       unpricedRequests: reqs.filter((r) => !r.priced).length,
       sideCost: sum(reqs, (r) => r.side),
+      byRole: roleSplit(reqs),
       history: this.history(),
       live: this.liveSessions(),
     };
@@ -214,6 +231,7 @@ export class Api {
         peakContext: peak,
         peakContextPct: peakPct,
         spark: main.map((r) => r.contextTokens),
+        byRole: roleSplit(reqs),
       });
     }
     rows.sort((a, b) => b.cost - a.cost);
@@ -240,6 +258,7 @@ export class Api {
         checkpoint: s.checkpoint,
         live: this.store.live.has(s.id),
         unpriced: reqs.filter((r) => !r.priced).length,
+        byRole: roleSplit(reqs),
       },
       requests: reqs.map((r) => ({
         id: r.id,
@@ -257,6 +276,8 @@ export class Api {
         tools: r.tools,
         promptId: r.promptId,
         stopReason: r.stopReason,
+        role: r.role,
+        trigger: r.trigger,
       })),
       turns,
       subagents: s.subagents
@@ -268,8 +289,9 @@ export class Api {
             agentType: a.agentType,
             description: a.description,
             toolUseId: a.toolUseId,
+            launchedBy: a.launchedBy,
             requests: rs.length,
-            cost: sum(rs, (r) => r.cost),
+            cost: sum(rs, (r) => r.cost + r.side),
             firstTs: Math.min(...rs.map((r) => r.ts)),
             model: rs[0] ? shortModel(rs[0].model) : undefined,
           };
@@ -312,8 +334,9 @@ export class Api {
         text: prompts.get(promptId)?.text ?? (promptId === 'unknown' ? '(no prompt found)' : '(prompt not in this file)'),
         ts: prompts.get(promptId)?.ts ?? rs[0].ts,
         requestIds: rs.map((r) => r.id),
-        cost: sum(rs, (r) => r.cost),
+        cost: sum(rs, (r) => r.cost + r.side),
         output: sum(rs, (r) => r.usage.output),
+        byRole: roleSplit(rs),
       }))
       .sort((a, b) => a.ts - b.ts);
   }
@@ -341,6 +364,16 @@ export class Api {
         contextLimit: r.contextLimit,
         tools: r.tools,
         stopReason: r.stopReason,
+        role: r.role,
+        trigger: r.trigger,
+        launched: s?.subagents.filter((x) => x.launchedBy === r.id && x.requestIds.length).map((x) => {
+          const rs = x.requestIds.map((rid) => this.store.requests.get(rid)!).filter(Boolean);
+          return { agentId: x.agentId, agentType: x.agentType, description: x.description, requests: rs.length, cost: sum(rs, (q) => q.cost + q.side), firstRequestId: rs.sort((a, b) => a.ts - b.ts)[0]?.id };
+        }) ?? [],
+        subagent: r.agentId ? (() => {
+          const x = s?.subagents.find((a) => a.agentId === r.agentId);
+          return x ? { agentType: x.agentType, description: x.description, launchedBy: x.launchedBy } : undefined;
+        })() : undefined,
       },
       session: s ? { id: s.id, title: s.title, project: s.project } : undefined,
       thread: { index: pos, count: thread.length, prev: thread[pos - 1]?.id, next: thread[pos + 1]?.id },

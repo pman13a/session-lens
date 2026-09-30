@@ -56,6 +56,8 @@ export interface Rec {
   skills?: string[];
   isMeta?: boolean;
   isHuman?: boolean;
+  /** Who wrote a user record: human, task-notification, … (Claude Code's `origin.kind`). */
+  origin?: string;
   pieces: ContentPiece[];
 }
 
@@ -89,6 +91,27 @@ export interface Price {
   context: number;
 }
 
+/**
+ * Why a request happened.
+ * - prompt: the call your message started (Claude's first response to you)
+ * - iteration: Claude calling itself again with tool results, to get your work done
+ * - answer: the last iteration of a turn, which replies to you and stops
+ * - subagent: a request made inside a subagent Claude launched
+ * - auto: started by Claude Code itself (a background task finishing, compaction, a hook)
+ */
+export type RequestRole = 'prompt' | 'iteration' | 'answer' | 'subagent' | 'auto';
+
+export const ROLE_LABEL: Record<RequestRole, string> = {
+  prompt: 'Your prompts',
+  iteration: 'Claude iterating on tool results',
+  answer: 'Final answers to you',
+  subagent: 'Subagents',
+  auto: 'Automatic (background tasks, compaction)',
+};
+
+/** Who put a line item into the context window. */
+export type ItemOrigin = 'you' | 'claude' | 'tool' | 'subagent' | 'system';
+
 export interface Request {
   id: string;
   sessionId: string;
@@ -114,6 +137,9 @@ export interface Request {
   tools: string[];
   stopReason?: string;
   entrypoint?: string;
+  role: RequestRole;
+  /** For an iteration: the tools whose results it was answering. For auto: what woke it. */
+  trigger?: string[];
 }
 
 export interface SubagentInfo {
@@ -122,6 +148,8 @@ export interface SubagentInfo {
   description?: string;
   toolUseId?: string;
   requestIds: string[];
+  /** The main-thread request whose Agent/Task tool call launched this subagent. */
+  launchedBy?: string;
 }
 
 export interface Session {

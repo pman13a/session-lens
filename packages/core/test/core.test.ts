@@ -630,3 +630,53 @@ describe('settings: prices from Anthropic', () => {
     expect(p.sources['claude-nova-2']).toBe('custom');
   });
 });
+
+describe('who made each call', () => {
+  function session() {
+    const t = new Transcript('s1');
+    t.prompt('fix the build');
+    t.response('r1', usage(5, 0, 3000, 50), [{ type: 'tool_use', id: 'tb', name: 'Bash', input: { command: 'npm test' } }]);
+    t.toolResult('tb', 'FAIL x'.repeat(200));
+    t.response('r2', usage(5, 3000, 600, 50), [{ type: 'tool_use', id: 'ta', name: 'Agent', input: { description: 'find the bug', prompt: 'look' } }]);
+    t.toolResult('ta', 'the bug is in parse.ts '.repeat(40));
+    t.response('r3', usage(5, 3600, 400, 80), [{ type: 'text', text: 'Fixed it.' }]);
+    // A background task finishing wakes Claude with no message from you.
+    t.lines.push({ type: 'user', uuid: 'tn', parentUuid: t.last, isMeta: true, origin: { kind: 'task-notification' }, timestamp: new Date((t.t += 1000)).toISOString(), sessionId: 's1', message: { role: 'user', content: '<task-notification>done</task-notification>' } });
+    t.last = 'tn';
+    t.response('r4', usage(5, 4000, 100, 20), [{ type: 'text', text: 'The build finished.' }]);
+    const sub = new Transcript('s1', { isSidechain: true, agentId: 'a1' });
+    sub.prompt('look');
+    sub.response('rs', usage(5, 0, 900, 40), [{ type: 'text', text: 'found it' }]);
+    return makeStore({
+      's1.jsonl': t.text(),
+      's1/subagents/agent-a1.jsonl': sub.text(),
+      's1/subagents/agent-a1.meta.json': JSON.stringify({ agentType: 'Explore', description: 'find the bug', toolUseId: 'ta' }),
+    });
+  }
+
+  it('tells your prompt, Claude’s iterations, the final answer, subagents and automatic calls apart', () => {
+    const store = session();
+    const role = (id: string) => store.requests.get(id)!.role;
+    expect(['r1', 'r2', 'r3', 'r4', 'rs'].map(role)).toEqual(['prompt', 'iteration', 'answer', 'auto', 'subagent']);
+    expect(store.requests.get('r2')!.trigger).toEqual(['Bash']);
+    expect(store.requests.get('r4')!.trigger).toEqual(['task-notification']);
+    expect(store.sessions.get('s1')!.subagents[0].launchedBy).toBe('r2');
+    const api = new Api(store);
+    const d = api.session('s1')!;
+    expect(Object.keys(d.session.byRole).sort()).toEqual(['answer', 'auto', 'iteration', 'prompt', 'subagent']);
+    expect(api.request('r2')!.request.launched.map((x) => x.agentType)).toEqual(['Explore']);
+  });
+
+  it('labels each line item by who put it in the context', () => {
+    const store = session();
+    const a = attribute(store, 'r3')!;
+    const result = (tool: string) => a.items.find((i) => i.kind === 'tool_result' && i.toolName === tool)!.origin;
+    expect(a.items.find((i) => i.kind === 'prompt')!.origin).toBe('you');
+    expect(result('Bash')).toBe('tool');
+    expect(result('Agent')).toBe('subagent');
+    expect(a.items.find((i) => i.kind === 'baseline')!.origin).toBe('system');
+    expect(a.items.filter((i) => i.kind === 'tool_use').every((i) => i.origin === 'claude')).toBe(true);
+    const point = sessionComposition(store, 's1').find((p) => p.id === 'r3')!;
+    expect(Object.values(point.byOrigin).reduce((x, y) => x + (y ?? 0), 0)).toBe(point.total);
+  });
+});

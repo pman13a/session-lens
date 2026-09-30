@@ -483,6 +483,7 @@ export class Store extends EventEmitter {
           tools: r.pieces.filter((p) => p.kind === 'tool_use').map((p) => p.label),
           stopReason: r.stopReason,
           entrypoint: r.entrypoint,
+          role: f.agentId ? 'subagent' : 'iteration',
         };
         position.set(req.id, ri);
         this.requests.set(req.id, req);
@@ -496,6 +497,7 @@ export class Store extends EventEmitter {
       req.cost = req.priced ? this.pricer.cost(req.model, u) : 0;
       req.contextTokens = u.input + u.cacheRead + u.cacheWrite5m + u.cacheWrite1h;
     }
+    for (const s of this.sessions.values()) this.assignRoles(s);
     for (const [id, s] of this.sessions) {
       // A session whose every file was a fork copy has nothing of its own left; drop it.
       if (!s.requestIds.length && s.subagents.every((a) => !a.requestIds.length)) {
@@ -504,6 +506,51 @@ export class Store extends EventEmitter {
       }
       this.reconcile(s, position);
     }
+  }
+
+  /**
+   * Tell your calls from Claude's own: walk back from each main-thread request to the user record that
+   * made it happen. Your typed message → prompt; tool results → iteration; a background task or other
+   * harness message → auto. An iteration that calls no tools ends the loop: that is the answer to you.
+   */
+  private assignRoles(s: Session) {
+    const main = s.requestIds.map((id) => this.requests.get(id)!).filter(Boolean);
+    // Transcripts older than `origin` tags: treat any plain typed text as yours.
+    const legacy = new Map<string, boolean>();
+    const isLegacy = (file: string) => {
+      if (!legacy.has(file)) legacy.set(file, !(this.files.get(file)?.records.some((r) => r.origin) ?? false));
+      return legacy.get(file)!;
+    };
+    for (const r of main) {
+      const t = this.triggerOf(r, isLegacy(r.file));
+      r.role = t.role;
+      r.trigger = t.trigger;
+    }
+    // An iteration that calls no tools has nothing left to iterate on: it is the reply to you.
+    for (const r of main) if (r.role === 'iteration' && !r.tools.length) r.role = 'answer';
+    for (const a of s.subagents) {
+      if (!a.toolUseId) continue;
+      a.launchedBy = main.find((r) => r.uuids.some((u) => this.record(r.file, u)?.pieces.some((p) => p.toolUseId === a.toolUseId)))?.id;
+    }
+  }
+
+  private triggerOf(r: Request, legacy: boolean): { role: Request['role']; trigger?: string[] } {
+    let cur = this.record(r.file, r.firstUuid);
+    cur = cur?.parentUuid ? this.record(r.file, cur.parentUuid) : undefined;
+    for (let hops = 0; cur && hops < 500; hops++) {
+      if (cur.type === 'assistant' && cur.requestId !== r.id) return { role: 'auto' }; // nothing from anyone in between
+      if (cur.type === 'user') {
+        const results = cur.pieces.filter((p) => p.kind === 'tool_result');
+        if (results.length) return { role: 'iteration', trigger: [...new Set(results.map((p) => p.toolName ?? p.label))] };
+        if (cur.isHuman) return { role: 'prompt' };
+        if (cur.origin) return { role: 'auto', trigger: [cur.origin] };
+        if (cur.pieces.some((p) => p.kind === 'compact_summary')) return { role: 'auto', trigger: ['compaction'] };
+        if (legacy && !cur.isMeta && cur.pieces.some((p) => p.kind === 'meta' || p.kind === 'prompt')) return { role: 'prompt' };
+        // Harness text that follows your message (a command's expansion, a skill body): keep walking to it.
+      }
+      cur = cur.parentUuid ? this.record(r.file, cur.parentUuid) : undefined;
+    }
+    return { role: 'auto' };
   }
 
   /**

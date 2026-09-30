@@ -42,6 +42,7 @@ export interface Summary {
   unknownModels: string[];
   unpricedRequests: number;
   sideCost: number;
+  byRole: RoleSplit;
   history: { oldestDay?: string; retentionDays: number; keptSince: string };
   live: { id: string; title: string; project?: string; entrypoint?: string; pid: number; lastTs: number; cost: number; contextTokens: number; contextLimit: number; requests: number }[];
 }
@@ -65,7 +66,12 @@ export interface SessionRow {
   peakContextPct: number;
   spark: number[];
   live: boolean;
+  byRole: RoleSplit;
 }
+
+export type RequestRole = 'prompt' | 'iteration' | 'answer' | 'subagent' | 'auto';
+export type ItemOrigin = 'you' | 'claude' | 'tool' | 'subagent' | 'system';
+export type RoleSplit = Partial<Record<RequestRole, { requests: number; cost: number; output: number }>>;
 
 export interface RequestRow {
   id: string;
@@ -84,6 +90,19 @@ export interface RequestRow {
   tools: string[];
   promptId?: string;
   stopReason?: string;
+  role: RequestRole;
+  trigger?: string[];
+}
+
+export interface SubagentRow {
+  agentId: string;
+  agentType?: string;
+  description?: string;
+  launchedBy?: string;
+  requests: number;
+  cost: number;
+  firstTs: number;
+  model?: string;
 }
 
 export interface SessionDetail {
@@ -100,10 +119,11 @@ export interface SessionDetail {
     checkpoint?: { claudeCodeUSD: number; transcriptUSD: number; ts: number };
     live: boolean;
     unpriced: number;
+    byRole: RoleSplit;
   };
   requests: RequestRow[];
-  turns: { promptId: string; text: string; ts: number; requestIds: string[]; cost: number; output: number }[];
-  subagents: { agentId: string; agentType?: string; description?: string; requests: number; cost: number; firstTs: number; model?: string }[];
+  turns: { promptId: string; text: string; ts: number; requestIds: string[]; cost: number; output: number; byRole: RoleSplit }[];
+  subagents: SubagentRow[];
 }
 
 export type ItemKind =
@@ -131,10 +151,14 @@ export interface ContextItem {
   added: boolean;
   ts: number;
   toolName?: string;
+  origin: ItemOrigin;
 }
 
 export interface RequestDetail {
-  request: Omit<RequestRow, 'day' | 'promptId'>;
+  request: Omit<RequestRow, 'day' | 'promptId'> & {
+    launched: { agentId: string; agentType?: string; description?: string; requests: number; cost: number; firstRequestId?: string }[];
+    subagent?: { agentType?: string; description?: string; launchedBy?: string };
+  };
   session?: { id: string; title: string; project: string };
   thread: { index: number; count: number; prev?: string; next?: string };
   attribution: {
@@ -170,6 +194,8 @@ export interface CompositionPoint {
   total: number;
   contextLimit: number;
   byKind: Partial<Record<ItemKind, number>>;
+  byOrigin: Partial<Record<ItemOrigin, number>>;
+  role: RequestRole;
 }
 
 export interface UsageSeries {
@@ -187,7 +213,7 @@ export interface UsageSeries {
 export interface UsageView {
   range: { from: string; to: string; days: number; prior: { from: string; to: string; incomplete: boolean }; timeZone: string };
   history: { oldestDay?: string; keptSince: string; retentionDays: number };
-  group: 'product' | 'model' | 'project' | 'surface';
+  group: 'product' | 'model' | 'project' | 'surface' | 'role';
   interval: 'day' | 'week';
   buckets: string[];
   series: UsageSeries[];

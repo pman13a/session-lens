@@ -179,7 +179,9 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .turn[open] summary::before { content: '▾'; }
 .turn table { margin-top: 6px; }
 .heat { display: inline-block; min-width: 64px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
-.turn summary .prompt-no { flex: none; color: var(--text-secondary); font-weight: 600; font-size: 12px; min-width: 64px; }
+.turn summary .prompt-no { flex: none; color: var(--text-muted); font-weight: 600; font-size: 12px; min-width: 76px; white-space: nowrap; }
+/* Low-profile request count: small, outlined, muted, fixed width so the prompt text lines up. */
+.turn summary .req-count { flex: none; min-width: 34px; text-align: center; font-size: 11px; line-height: 16px; padding: 0 5px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .turn summary .req-range { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .turn summary .heat { flex: none; min-width: 72px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-variant-numeric: tabular-nums; }
 

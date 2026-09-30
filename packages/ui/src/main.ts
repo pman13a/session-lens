@@ -1102,6 +1102,7 @@ async function sessionView(token: number, id: string, day?: string) {
         'summary',
         {},
         h('span', { class: 'prompt-no', title: `Your ${i + 1}${['th', 'st', 'nd', 'rd'][(i + 1) % 100 > 10 && (i + 1) % 100 < 14 ? 0 : Math.min((i + 1) % 10, 4) % 4] ?? 'th'} prompt in this session` }, `Prompt ${i + 1}`),
+        h('span', { class: 'req-count', title: `${t.requestIds.length} requests made for this prompt, subagents included` }, String(t.requestIds.length)),
         // Hover shows the whole prompt in a popover (pointer can move into it to scroll a long one).
         h('span', { class: 'prompt' }, h('span', { class: 't' }, t.text), h('div', { class: 'prompt-full', role: 'tooltip', onclick: (e: Event) => e.preventDefault() }, t.fullText ?? t.text)),
         (() => {
@@ -1112,8 +1113,7 @@ async function sessionView(token: number, id: string, day?: string) {
           return h(
             'span',
             { class: 'muted req-range', title: 'Request numbers on the timeline (main thread)' + (subs ? `, plus ${subs} subagent requests` : '') },
-            range ? `requests ${range}` : '',
-            h('span', {}, ` · ${t.requestIds.length} req`),
+            range ? `${range.includes('–') ? 'requests' : 'request'} ${range}` : '',
           );
         })(),
         h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),

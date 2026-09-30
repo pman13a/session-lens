@@ -161,6 +161,17 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .turn summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; list-style: none; }
 .turn summary::-webkit-details-marker { display: none; }
 .turn summary .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn summary .prompt { flex: 1; min-width: 0; position: relative; display: flex; }
+.turn summary .prompt .t { flex: 1; }
+.turn summary .prompt-full {
+  display: none; position: absolute; top: calc(100% + 2px); left: 0; z-index: 30;
+  width: min(760px, 80vw); max-height: 50vh; overflow: auto; padding: 10px 12px;
+  background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.45; cursor: text;
+}
+/* A short delay so skimming down the list doesn't flash popovers; stays open while the pointer is inside it. */
+.turn summary .prompt:hover .prompt-full { display: block; animation: prompt-in 0s 0.35s both; }
+@keyframes prompt-in { from { visibility: hidden; } to { visibility: visible; } }
 .turn summary::before { content: '▸'; color: var(--text-muted); width: 10px; flex: none; }
 .turn[open] summary::before { content: '▾'; }
 .turn table { margin-top: 6px; }

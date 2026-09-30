@@ -122,7 +122,7 @@ export interface SessionDetail {
     byRole: RoleSplit;
   };
   requests: RequestRow[];
-  turns: { promptId: string; text: string; ts: number; requestIds: string[]; cost: number; output: number; byRole: RoleSplit }[];
+  turns: { promptId: string; text: string; fullText?: string; ts: number; requestIds: string[]; cost: number; output: number; byRole: RoleSplit }[];
   subagents: SubagentRow[];
 }
 

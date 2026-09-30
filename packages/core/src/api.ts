@@ -302,13 +302,24 @@ export class Api {
   /** A turn = one human prompt and every request (main + subagent) that answered it. */
   private turns(s: Session, reqs: Request[]) {
     const file = s.mainFile;
-    const prompts = new Map<string, { text: string; ts: number }>();
+    const prompts = new Map<string, { text: string; full: string; ts: number }>();
     if (file) {
       const f = this.store.files.get(file);
       for (const r of f?.records ?? []) {
         if (r.type === 'user' && r.promptId && r.isHuman && !prompts.has(r.promptId)) {
-          const p = r.pieces.find((x) => x.kind === 'prompt' || x.kind === 'meta');
-          if (p) prompts.set(r.promptId, { text: p.label, ts: r.ts });
+          const texts = r.pieces.filter((x) => x.kind === 'prompt' || x.kind === 'meta');
+          if (!texts.length) continue;
+          // The whole prompt, for reading on hover (read back from the file; capped so a huge paste stays light).
+          let full = '';
+          try {
+            const line = this.store.readRecord(file, r);
+            full = texts.map((x) => blockText(line, x.block)).join('\n\n');
+          } catch {
+            full = texts.map((x) => x.label).join('\n\n');
+          }
+          const CAP = 8000;
+          if (full.length > CAP) full = full.slice(0, CAP) + `\n… (${full.length - CAP} more characters)`;
+          prompts.set(r.promptId, { text: texts[0].label, full, ts: r.ts });
         }
       }
     }
@@ -332,6 +343,7 @@ export class Api {
       .map(([promptId, rs]) => ({
         promptId,
         text: prompts.get(promptId)?.text ?? (promptId === 'unknown' ? '(no prompt found)' : '(prompt not in this file)'),
+        fullText: prompts.get(promptId)?.full,
         ts: prompts.get(promptId)?.ts ?? rs[0].ts,
         requestIds: rs.map((r) => r.id),
         cost: sum(rs, (r) => r.cost + r.side),

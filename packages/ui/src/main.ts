@@ -1090,7 +1090,8 @@ async function sessionView(token: number, id: string, day?: string) {
         'summary',
         {},
         h('span', { class: 'muted' }, String(i + 1)),
-        h('span', { class: 't', title: t.text }, t.text),
+        // Hover shows the whole prompt in a popover (pointer can move into it to scroll a long one).
+        h('span', { class: 'prompt' }, h('span', { class: 't' }, t.text), h('div', { class: 'prompt-full', role: 'tooltip', onclick: (e: Event) => e.preventDefault() }, t.fullText ?? t.text)),
         h('span', { class: 'muted' }, `${t.requestIds.length} req`),
         h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
         h('b', { class: 'heat', style: { background: heat(t.cost) }, title: `${fmtUSD(t.cost)}: green is this session’s cheapest prompt, red its most expensive` }, fmtUSD(t.cost)),

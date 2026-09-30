@@ -1048,7 +1048,16 @@ async function sessionView(token: number, id: string, day?: string) {
     { key: 'cost', label: costWord(), num: true, cell: (r) => (r.priced === false ? h('span', { class: 'muted', title: 'No price on file for this model' }, '—') : fmtUSD(r.cost)) },
   ];
   const opened = openTurns.get(s.id);
-  const turns = d.turns.map((t, i) =>
+  // Heat scale for prompt cost: green (cheapest) to red (most expensive), on a log scale so one huge
+  // prompt doesn't turn every other one green.
+  const costs = d.turns.map((t) => t.cost);
+  const lo = Math.log(Math.min(...costs, Infinity) + 0.001);
+  const hi = Math.log(Math.max(...costs, 0) + 0.001);
+  const heat = (c: number) => {
+    const p = hi > lo ? (Math.log(c + 0.001) - lo) / (hi - lo) : 0;
+    return `hsl(${Math.round(120 * (1 - Math.min(1, Math.max(0, p))))} 70% 38%)`;
+  };
+  const turnEl = (t: SessionDetail['turns'][number], i: number) =>
     h(
       'details',
       {
@@ -1067,10 +1076,38 @@ async function sessionView(token: number, id: string, day?: string) {
         h('span', { class: 't', title: t.text }, t.text),
         h('span', { class: 'muted' }, `${t.requestIds.length} req`),
         h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
-        h('b', {}, fmtUSD(t.cost)),
+        h('b', { class: 'heat', style: { background: heat(t.cost) }, title: `${fmtUSD(t.cost)}: green is this session’s cheapest prompt, red its most expensive` }, fmtUSD(t.cost)),
       ),
       table(t.requestIds.map((rid) => byId.get(rid)!.r), reqCols, { id: `turn:${t.promptId}`, onRow: (r) => open(r.id) }),
-    ),
+    );
+  let promptView = store.get('promptView', 'order') as 'order' | 'top';
+  const turnsHolder = h('div');
+  const drawTurns = () => {
+    const list = d.turns.map((t, i) => ({ t, i }));
+    const shown = promptView === 'top' ? [...list].sort((a, b) => b.t.cost - a.t.cost).slice(0, 10) : list;
+    turnsHolder.replaceChildren(...shown.map(({ t, i }) => turnEl(t, i)));
+  };
+  drawTurns();
+  const promptSeg = seg(
+    [
+      { key: 'order', label: 'All, in order' },
+      { key: 'top', label: 'Top 10 by cost' },
+    ],
+    promptView,
+    (k) => {
+      promptView = k;
+      store.set('promptView', k);
+      promptSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'order' : 'top') === k)));
+      drawTurns();
+    },
+  );
+  const heatKey = h(
+    'div',
+    { class: 'legend', style: { justifyContent: 'flex-end' } },
+    h('span', { class: 'muted' }, 'Prompt cost:'),
+    h('span', {}, 'lowest'),
+    h('span', { style: { width: '90px', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg, hsl(120 70% 38%), hsl(60 70% 38%), hsl(0 70% 38%))' } }),
+    h('span', {}, 'highest'),
   );
   const kids: Node[] = [
     h(
@@ -1096,10 +1133,14 @@ async function sessionView(token: number, id: string, day?: string) {
     card(
       'Prompts',
       'Each prompt with the requests that answered it (subagent work is grouped under the prompt that launched it). The bar splits each prompt’s cost by who made the calls.',
-      exportButtons(`session-${s.id.slice(0, 8)}-requests`, () =>
-        reqs.map((r, i) => ({ n: i + 1, id: r.id, time: new Date(r.ts).toISOString(), thread: r.agentId ?? 'main', role: r.role, trigger: (r.trigger ?? []).join(' '), model: r.model, tools: r.tools.join(' '), contextTokens: r.contextTokens, ...r.usage, cost: r.cost })),
-      ),
-      ...turns,
+      [
+        promptSeg,
+        ...exportButtons(`session-${s.id.slice(0, 8)}-requests`, () =>
+          reqs.map((r, i) => ({ n: i + 1, id: r.id, time: new Date(r.ts).toISOString(), thread: r.agentId ?? 'main', role: r.role, trigger: (r.trigger ?? []).join(' '), model: r.model, tools: r.tools.join(' '), contextTokens: r.contextTokens, ...r.usage, cost: r.cost })),
+        ),
+      ],
+      heatKey,
+      turnsHolder,
     ),
   ];
   if (d.subagents.length)

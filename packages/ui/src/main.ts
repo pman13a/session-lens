@@ -258,12 +258,33 @@ function lensIcon() {
   return svg;
 }
 
+const PAGE_KIND: Partial<Record<Route['view'], string>> = { day: 'Day', session: 'Session', request: 'Request' };
+
+/**
+ * The trail above the page. On a drill-down page (day, session, request) it becomes a page header:
+ * a Back button to the level above, what kind of page this is, and its title, so it never reads as the
+ * overview.
+ */
 function setCrumbs(parts: { label: string; href?: string }[]) {
   crumbs.replaceChildren();
+  const trail = h('div', { class: 'trail' });
   parts.forEach((p, i) => {
-    if (i) crumbs.append(h('span', { class: 'sep' }, '›'));
-    crumbs.append(p.href ? h('a', { href: p.href }, p.label) : h('span', { class: 'here', title: p.label }, p.label));
+    if (i) trail.append(h('span', { class: 'sep' }, '›'));
+    trail.append(p.href ? h('a', { href: p.href }, p.label) : h('span', { class: 'here', title: p.label }, p.label));
   });
+  const view = parseRoute().view;
+  const parent = [...parts].reverse().find((p) => p.href);
+  if (parts.length < 2 || !parent || !PAGE_KIND[view]) {
+    crumbs.className = 'crumbs';
+    crumbs.append(trail);
+    return;
+  }
+  crumbs.className = 'crumbs page';
+  const current = parts[parts.length - 1];
+  crumbs.append(
+    h('a', { class: 'btn back', href: parent.href!, title: `Back to ${parent.label}` }, `← ${parent.label}`),
+    h('div', { class: 'page-title' }, trail, h('div', { class: 'kind' }, PAGE_KIND[view]!), h('h1', { title: current.label }, current.label)),
+  );
 }
 
 function tile(label: string, value: string, sub?: string, hero = false) {

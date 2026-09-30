@@ -77,6 +77,8 @@ export interface RequestRow {
   cost: number;
   costParts: CostParts;
   priced?: boolean;
+  /** This request's share of side calls reconciled from Claude Code's own tally. */
+  side?: number;
   contextTokens: number;
   contextLimit: number;
   tools: string[];

@@ -48,9 +48,9 @@ Every view updates while Claude Code works, usually within half a second of a tr
 
 | Level | Shows | Click |
 |---|---|---|
-| Overview | Cost or tokens per day, stacked by input / cache write / cache read / output. Totals, sessions in range, CSV/JSON export | a day |
+| Overview | Cost or tokens per day, stacked by input / cache write / cache read / output. **Spend accumulated** over the range, with your monthly limit or plan fee as a reference line and the current pace carried to the end of the billing period. Totals, sessions in range, CSV/JSON export | a day |
 | Day | That day's sessions: context-growth sparkline, peak context %, tokens, cost | a session |
-| Session | **What filled the context over time** (stacked by kind, in tokens or % of context, per thread), context size per request against the limit, cost per request split by component, each prompt with the requests that answered it, subagents | a request |
+| Session | **What filled the context over time** (stacked by kind, in tokens or % of context, per thread), **cost accumulated over the session** (running total by component, by request or by clock time; the steps show where a cold cache was rewritten), context size per request against the limit, cost per request split by component, each prompt with the requests that answered it, subagents | a request |
 | Request | Measured totals, a composition bar, a treemap and ranked table of every context line item, "added this turn" filter, prev/next, and the response's own blocks | an item, to read its raw text |
 
 ## How the numbers are made

@@ -1,7 +1,7 @@
 import './style.css';
 import { api, saveFile, subscribe, type AccountState, type BillingMode, type CompositionPoint, type UsageView, type ContextItem, type RequestDetail, type RequestRow, type SessionDetail, type SessionRow, type Summary } from './api';
-import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll, setAnimation, usageChart, usageColors } from './charts';
-import { daysAgo, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
+import { CATEGORIES, categoryColor, categoryOf, COMPONENTS, SIDE_COMPONENT, compositionChart, contextChart, contextTreemap, costChart, cssVar, dailyChart, disposeAll, rangeAccumulationChart, sessionAccumulationChart, setAnimation, usageChart, usageColors } from './charts';
+import { daysAgo, isoDay, fmtDateTime, fmtDay, fmtDuration, fmtInt, fmtPct, fmtTime, fmtTokens, fmtUSD } from './format';
 
 /* ---------- tiny DOM helper: text always goes in as textContent ---------- */
 
@@ -681,11 +681,44 @@ async function overview(token: number) {
       tableHolder,
     ),
   );
+  // Running total over the range, with the limit or plan fee as a reference and the pace carried forward.
+  const accEl = h('div', { class: 'chart' });
+  const accFrom = rangeParams().from ?? sum.range.first ?? isoDay(new Date());
+  const accTo = isoDay(new Date());
+  const accDays = Math.round((Date.parse(accTo) - Date.parse(accFrom)) / 86_400_000) + 1;
+  const refBase = acct?.mode === 'subscription' ? acct.planPrice : acct?.settings.monthlyLimit;
+  const reference = refBase
+    ? { value: (refBase * accDays) / 30, label: `${acct?.mode === 'subscription' ? 'Plan fee' : 'Monthly limit'}${accDays === 30 ? '' : ' (prorated)'}` }
+    : undefined;
+  const projectTo = acct && acct.period.end > accTo ? acct.period.end : undefined;
+  const accSub = h('div', { class: 'sub' }, 'Running total over the range. Click a day to open it.');
+  kids.push(
+    card(
+      `${acct?.mode === 'subscription' ? 'API value' : 'Spend'} accumulated`,
+      null,
+      [],
+      accSub,
+      legend(
+        [...COMPONENTS, ...(sum.days.some((d) => (d.costParts.side ?? 0) > 0) ? [SIDE_COMPONENT] : [])]
+          .filter((c) => sum.days.some((d) => ((d.costParts as unknown as Record<string, number>)[c.key] ?? 0) > 0))
+          .map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))
+          .concat(projectTo ? [{ label: 'On pace to period end', color: cssVar('--text-secondary') }] : [])
+          .concat(reference ? [{ label: reference.label, color: cssVar('--critical') }] : []),
+      ),
+      accEl,
+    ),
+  );
   const live = liveCard(sum.live);
   if (live) kids.splice(1, 0, live);
   kids.push(sessionsCard(sess.sessions, 'Sessions in range', undefined));
   swap(...(kids.filter(Boolean) as Node[]));
   dailyChart(chartEl, sum.days, state.dailyMode, (day) => go(`#/day/${day}`));
+  const acc = rangeAccumulationChart(accEl, sum.days, { from: accFrom, to: accTo, reference, projectTo }, (day) => go(`#/day/${day}`));
+  accSub.textContent =
+    `${fmtUSD(acc.total)} over ${accDays} day${accDays === 1 ? '' : 's'}` +
+    (acc.projected != null && projectTo ? ` · on pace for ${fmtUSD(acc.projected)} by ${fmtDay(projectTo)}` : '') +
+    (reference ? ` · ${fmtPct(reference.value ? acc.total / reference.value : 0)} of the ${reference.label.toLowerCase()}` : '') +
+    '. Click a day to open it.';
 }
 
 /* ---------- level 2: sessions (for a day or the range) ---------- */
@@ -741,6 +774,45 @@ async function dayView(token: number, day: string) {
 }
 
 /* ---------- level 3: one session ---------- */
+
+/** Running total of the session's cost, by request or by clock time. */
+function accumulationCard(reqs: RequestRow[], open: (id: string) => void): Node {
+  const chartEl = h('div', { class: 'chart' });
+  let axis = store.get('accAxis', 'request') as 'request' | 'time';
+  const total = reqs.reduce((a, r) => a + r.cost + (r.side ?? 0), 0);
+  const parts = [...COMPONENTS, SIDE_COMPONENT].filter((c) =>
+    reqs.some((r) => (c.key === 'side' ? r.side ?? 0 : (r.costParts as unknown as Record<string, number>)[c.key] ?? 0) > 0),
+  );
+  const draw = () => {
+    const old = (chartEl as unknown as { _chart?: { dispose(): void } })._chart;
+    old?.dispose();
+    (chartEl as unknown as { _chart?: unknown })._chart = sessionAccumulationChart(chartEl, reqs, axis, open);
+  };
+  const axisSeg = seg(
+    [
+      { key: 'request', label: 'By request' },
+      { key: 'time', label: 'By time' },
+    ],
+    axis,
+    (k) => {
+      axis = k;
+      store.set('accAxis', k);
+      axisSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'request' : 'time') === k)));
+      draw();
+    },
+  );
+  const first = reqs[0]?.ts ?? 0;
+  const last = reqs[reqs.length - 1]?.ts ?? 0;
+  const el = card(
+    `${costWord()} accumulated over the session`,
+    `${fmtUSD(total)} over ${reqs.length} requests in ${fmtDuration(last - first)}. Click a point to open that request.`,
+    [axisSeg],
+    legend(parts.map((c) => ({ label: c.label, color: cssVar(`--series-${c.slot}`) }))),
+    chartEl,
+  );
+  queueMicrotask(draw);
+  return el;
+}
 
 function compositionCard(points: CompositionPoint[], d: SessionDetail, open: (id: string) => void): Node {
   const chartEl = h('div', { class: 'chart tall' });
@@ -863,6 +935,7 @@ async function sessionView(token: number, id: string, day?: string) {
       tile('Cache read / write', `${fmtTokens(u.read)} / ${fmtTokens(u.write)}`, `${fmtTokens(u.out)} output`),
     ),
     compositionCard(comp.points, d, open),
+    accumulationCard(reqs, open),
     h(
       'div',
       { class: 'grid2' },

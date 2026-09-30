@@ -62,6 +62,14 @@ export function categoryColor(c: (typeof CATEGORIES)[number]): string {
   return c.slot ? series(c.slot) : cssVar('--other');
 }
 
+/** Round an axis top up to a clean value (1, 2, 2.5, 5 × 10ⁿ) so the last tick reads naturally. */
+export function niceCeil(v: number): number {
+  if (!(v > 0)) return 1;
+  const mag = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 2, 2.5, 5, 10]) if (v <= m * mag) return m * mag;
+  return 10 * mag;
+}
+
 /** Off while redrawing live, so charts update in place instead of re-animating from zero. */
 let animate = true;
 export function setAnimation(on: boolean) {
@@ -251,7 +259,7 @@ export function contextChart(el: HTMLElement, reqs: RequestRow[], onReq: (id: st
       },
     },
     xAxis: { type: 'category', data: x, ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (_: string, i: number) => String(i + 1) } },
-    yAxis: { type: 'value', max: (v: { max: number }) => Math.max(v.max, peak * 1.1), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtTokens(v) } },
+    yAxis: { type: 'value', max: (v: { max: number }) => niceCeil(Math.max(v.max, peak * 1.04)), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtTokens(v) } },
     series: s,
   });
   if (selected) {
@@ -510,4 +518,178 @@ export function usageChart(el: HTMLElement, view: UsageView, onBucket: (bucket: 
     if (i != null && view.buckets[i]) onBucket(view.buckets[i]);
   });
   return chart;
+}
+
+/* ---------- cost accumulated over time ---------- */
+
+type Part = ComponentKey | 'side';
+const PARTS: { key: Part; label: string; slot: number }[] = [...COMPONENTS, SIDE_COMPONENT];
+
+/**
+ * Running total of a session's cost, stacked by what it was paid for. By request (clickable, lines up
+ * with the other session charts) or by clock time (shows idle gaps and bursts).
+ */
+export function sessionAccumulationChart(el: HTMLElement, reqs: RequestRow[], axis: 'request' | 'time', onReq: (id: string) => void) {
+  const b = base();
+  const chart = mount(el);
+  const all = [...reqs].sort((a, b) => a.ts - b.ts);
+  const value = (r: RequestRow, k: Part) => (k === 'side' ? r.side ?? 0 : r.costParts[k] ?? 0);
+  const parts = PARTS.filter((p) => all.some((r) => value(r, p.key) > 0));
+  const running = parts.map(() => 0);
+  const rows = all.map((r) => parts.map((p, i) => (running[i] += value(r, p.key))));
+  const surface = cssVar('--surface-1');
+  const byTime = axis === 'time';
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        const r = all[i];
+        const tot = rows[i].reduce((a, v) => a + v, 0);
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(r.ts)} · ${fmtUSD(tot)} so far</div>` +
+          [...parts].map((p, k) => ({ p, v: rows[i][k] })).reverse().map(({ p, v }) => row(series(p.slot), p.label, fmtUSD(v))).join('') +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">this request ${fmtUSD(r.cost + (r.side ?? 0))} · click to open it</div>`
+        );
+      },
+    },
+    xAxis: byTime
+      ? { type: 'time', ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtTime(v).replace(/:\d\d(\s|$)/, '$1') } }
+      : { type: 'category', boundaryGap: false, data: all.map((r) => r.id), ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (_: string, i: number) => String(i + 1) } },
+    yAxis: { type: 'value', ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    series: parts.map((p, k) => ({
+      name: p.label,
+      type: 'line',
+      stack: 'cum',
+      step: byTime ? 'end' : undefined,
+      symbol: 'none',
+      lineStyle: { width: 1, color: surface },
+      areaStyle: { color: series(p.slot), opacity: 0.9 },
+      emphasis: { disabled: true },
+      data: byTime ? all.map((r, i) => [r.ts, rows[i][k]]) : rows.map((row) => row[k]),
+    })),
+  });
+  chart.getZr().on('click', (e) => {
+    const pt = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    if (!pt) return;
+    let i: number;
+    if (byTime) {
+      const t = pt[0];
+      i = all.findIndex((r, j) => r.ts <= t && (j === all.length - 1 || all[j + 1].ts > t));
+    } else i = pt[0];
+    if (i >= 0 && all[i]) onReq(all[i].id);
+  });
+  return chart;
+}
+
+/**
+ * Spend accumulated day by day over the selected range, stacked by component, with the monthly limit or
+ * plan fee as a reference line and the current pace carried to the end of the billing period.
+ */
+export function rangeAccumulationChart(
+  el: HTMLElement,
+  days: DayRow[],
+  opts: { from: string; to: string; reference?: { value: number; label: string }; projectTo?: string },
+  onDay: (day: string) => void,
+) {
+  const b = base();
+  const chart = mount(el);
+  const surface = cssVar('--surface-1');
+  // Every calendar day in range, so idle days are flat steps rather than skipped.
+  const byDay = new Map(days.map((d) => [d.day, d]));
+  const labels: string[] = [];
+  for (let t = new Date(opts.from + 'T12:00:00'); ; t.setDate(t.getDate() + 1)) {
+    const d = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    if (d > opts.to) break;
+    labels.push(d);
+  }
+  const value = (d: DayRow | undefined, k: Part) => (!d ? 0 : k === 'side' ? d.costParts.side ?? 0 : d.costParts[k] ?? 0);
+  const parts = PARTS.filter((p) => days.some((d) => value(d, p.key) > 0));
+  const running = parts.map(() => 0);
+  const rows = labels.map((d) => parts.map((p, i) => (running[i] += value(byDay.get(d), p.key))));
+  const totalAt = (i: number) => rows[i]?.reduce((a, v) => a + v, 0) ?? 0;
+  const endTotal = totalAt(labels.length - 1);
+  // Pace: the average day so far, carried forward to the end of the period.
+  let proj: (number | null)[] | undefined;
+  const allLabels = [...labels];
+  if (opts.projectTo && opts.projectTo > opts.to && labels.length) {
+    for (let t = new Date(opts.to + 'T12:00:00'); ; ) {
+      t.setDate(t.getDate() + 1);
+      const d = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+      if (d > opts.projectTo) break;
+      allLabels.push(d);
+    }
+    const perDay = endTotal / labels.length;
+    proj = allLabels.map((_, i) => (i < labels.length - 1 ? null : endTotal + perDay * (i - (labels.length - 1))));
+  }
+  const muted = cssVar('--text-secondary');
+  const seriesOpts: object[] = parts.map((p, k) => ({
+    name: p.label,
+    type: 'line',
+    stack: 'cum',
+    symbol: 'none',
+    lineStyle: { width: 1, color: surface },
+    areaStyle: { color: series(p.slot), opacity: 0.9 },
+    emphasis: { disabled: true },
+    data: allLabels.map((_, i) => (i < rows.length ? rows[i][k] : null)),
+  }));
+  if (proj)
+    seriesOpts.push({
+      name: 'On pace',
+      type: 'line',
+      symbol: 'none',
+      lineStyle: { width: 2, color: muted, opacity: 0.7 },
+      data: proj,
+      z: 4,
+    });
+  if (opts.reference) {
+    const crit = cssVar('--critical');
+    // A flat series rather than a markLine: its colour and label are applied reliably on every redraw.
+    seriesOpts.push({
+      name: opts.reference.label,
+      type: 'line',
+      symbol: 'none',
+      silent: true,
+      z: 3,
+      lineStyle: { width: 1, color: crit },
+      itemStyle: { color: crit },
+      data: allLabels.map(() => opts.reference!.value),
+      endLabel: { show: true, formatter: `${opts.reference.label} ${fmtUSD(opts.reference.value)}`, color: cssVar('--text-secondary'), fontSize: 11, offset: [-150, -10] },
+      tooltip: { show: false },
+    });
+  }
+  const peak = Math.max(endTotal, proj ? proj[proj.length - 1] ?? 0 : 0, opts.reference?.value ?? 0);
+  chart.setOption({
+    ...b,
+    grid: { left: 8, right: 16, top: 20, bottom: 8, containLabel: true },
+    tooltip: {
+      ...b.tooltip,
+      trigger: 'axis',
+      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
+      formatter: (ps: { dataIndex: number }[]) => {
+        const i = ps[0].dataIndex;
+        if (i >= rows.length)
+          return `<div style="font-weight:600">${fmtDay(allLabels[i])}</div>` + row(muted, 'On pace', fmtUSD(proj?.[i] ?? 0));
+        const d = byDay.get(labels[i]);
+        return (
+          `<div style="font-weight:600;margin-bottom:4px">${fmtDay(labels[i])} · ${fmtUSD(totalAt(i))} so far</div>` +
+          [...parts].map((p, k) => ({ p, v: rows[i][k] })).reverse().map(({ p, v }) => row(series(p.slot), p.label, fmtUSD(v))).join('') +
+          `<div style="color:${cssVar('--text-muted')};margin-top:4px">${d ? `${fmtUSD(d.cost)} that day · click to open it` : 'no usage that day'}</div>`
+        );
+      },
+    },
+    xAxis: { type: 'category', boundaryGap: false, data: allLabels, ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: string) => fmtDay(v).replace(/^\w+, /, '') } },
+    yAxis: { type: 'value', max: (v: { max: number }) => niceCeil(Math.max(v.max, peak * 1.04)), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+    series: seriesOpts,
+  });
+  chart.getZr().on('click', (e) => {
+    const pt = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
+    const i = pt?.[0];
+    if (i != null && labels[i] && byDay.has(labels[i])) onDay(labels[i]);
+  });
+  return { chart, total: endTotal, projected: proj ? proj[proj.length - 1] ?? endTotal : undefined };
 }

@@ -1050,13 +1050,27 @@ async function sessionView(token: number, id: string, day?: string) {
   const opened = openTurns.get(s.id);
   // Heat scale for prompt cost: green (cheapest) to red (most expensive), on a log scale so one huge
   // prompt doesn't turn every other one green.
+  /**
+   * Green (cheapest) to red (most expensive), on a log scale. How far the colors go depends on how far
+   * apart the costs are, measured as a ratio so it adapts to any session: a 10× spread or more gets the
+   * full red–green range; costs close together stay a muted neutral, so nothing is flagged for nothing.
+   * A spread of only a few cents stays muted too, however large the ratio.
+   */
   const heatScale = (values: number[]) => {
-    const lo = Math.log(Math.min(...values, Infinity) + 0.001);
-    const hi = Math.log(Math.max(...values, 0) + 0.001);
-    return (c: number) => {
-      const p = hi > lo ? (Math.log(c + 0.001) - lo) / (hi - lo) : 0;
-      return `hsl(${Math.round(120 * (1 - Math.min(1, Math.max(0, p))))} 70% 38%)`;
+    const pos = values.filter((v) => v > 0);
+    const min = Math.max(Math.min(...pos, Infinity), 0.01);
+    const max = Math.max(...pos, 0);
+    const lo = Math.log(min);
+    const hi = Math.log(Math.max(max, min));
+    const ratio = max / min;
+    const strength = Math.min(1, Math.log(Math.max(ratio, 1)) / Math.log(10)) * Math.min(1, (max - min) / 0.1);
+    const color = (c: number) => {
+      const p = hi > lo ? Math.min(1, Math.max(0, (Math.log(Math.max(c, min)) - lo) / (hi - lo))) : 0.5;
+      const hue = 60 + (0.5 - p) * 120 * strength;
+      const sat = 12 + 58 * strength;
+      return `hsl(${Math.round(hue)} ${Math.round(sat)}% 38%)`;
     };
+    return Object.assign(color, { ratio, strength });
   };
   // Prompt level: each prompt against every other prompt in the session.
   const heat = heatScale(d.turns.map((t) => t.cost));
@@ -1125,7 +1139,11 @@ async function sessionView(token: number, id: string, day?: string) {
   const heatKey = h(
     'div',
     { class: 'legend', style: { justifyContent: 'flex-end' } },
-    h('span', { class: 'muted', title: 'Prompts are colored against each other; the requests inside a prompt against each other' }, 'Cost, relative to its level:'),
+    h(
+      'span',
+      { class: 'muted', title: 'Prompts are colored against each other, and the requests inside a prompt against each other. The wider the spread (most ÷ least expensive), the stronger the colors: 10× or more is full red–green; costs close together stay neutral.' },
+      `Cost, relative to its level (prompts here span ${heat.ratio >= 100 ? Math.round(heat.ratio) : heat.ratio.toFixed(1)}×):`,
+    ),
     h('span', {}, 'lowest'),
     h('span', { style: { width: '90px', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg, hsl(120 70% 38%), hsl(60 70% 38%), hsl(0 70% 38%))' } }),
     h('span', {}, 'highest'),

@@ -1037,8 +1037,19 @@ async function sessionView(token: number, id: string, day?: string) {
   );
   const byId = new Map(reqs.map((r, i) => [r.id, { r, n: i + 1 }]));
   const mainIds = reqs.filter((r) => !r.agentId).map((r) => r.id);
+  // One numbering everywhere: a main-thread request's number is its position on the timeline's x axis.
+  // Subagent requests are numbered on their own thread (S1, S2…), as the timeline shows them there.
+  const reqNo = new Map<string, string>();
+  mainIds.forEach((id, i) => reqNo.set(id, String(i + 1)));
+  for (const a of d.subagents) reqs.filter((r) => r.agentId === a.agentId).forEach((r, i) => reqNo.set(r.id, `S${i + 1}`));
   const reqCols: Col<RequestRow>[] = [
-    { key: 'n', label: '#', num: true, cell: (r) => byId.get(r.id)!.n },
+    {
+      key: 'n',
+      label: 'Request',
+      num: true,
+      sort: (r) => byId.get(r.id)!.n,
+      cell: (r) => h('span', { title: r.agentId ? 'Request number on the subagent’s own thread' : 'Same number as on the timeline’s x axis' }, `#${reqNo.get(r.id) ?? '?'}`),
+    },
     { key: 'time', label: 'Time', cell: (r) => fmtTime(r.ts) },
     { key: 'who', label: 'Why', sort: (r) => ROLES.findIndex((x) => x.key === r.role), cell: (r) => rolePill(r, true) },
     { key: 'model', label: 'Model', cell: (r) => h('span', { class: 'muted' }, r.model) },
@@ -1090,10 +1101,21 @@ async function sessionView(token: number, id: string, day?: string) {
       h(
         'summary',
         {},
-        h('span', { class: 'muted' }, String(i + 1)),
+        h('span', { class: 'prompt-no', title: `Your ${i + 1}${['th', 'st', 'nd', 'rd'][(i + 1) % 100 > 10 && (i + 1) % 100 < 14 ? 0 : Math.min((i + 1) % 10, 4) % 4] ?? 'th'} prompt in this session` }, `Prompt ${i + 1}`),
         // Hover shows the whole prompt in a popover (pointer can move into it to scroll a long one).
         h('span', { class: 'prompt' }, h('span', { class: 't' }, t.text), h('div', { class: 'prompt-full', role: 'tooltip', onclick: (e: Event) => e.preventDefault() }, t.fullText ?? t.text)),
-        h('span', { class: 'muted' }, `${t.requestIds.length} req`),
+        (() => {
+          // Where this prompt sits on the timeline: its first and last main-thread request numbers.
+          const nums = t.requestIds.map((id) => reqNo.get(id)).filter((x): x is string => !!x && !x.startsWith('S')).map(Number);
+          const range = nums.length ? (Math.min(...nums) === Math.max(...nums) ? `#${nums[0]}` : `#${Math.min(...nums)}–${Math.max(...nums)}`) : '';
+          const subs = t.requestIds.length - nums.length;
+          return h(
+            'span',
+            { class: 'muted req-range', title: 'Request numbers on the timeline (main thread)' + (subs ? `, plus ${subs} subagent requests` : '') },
+            range ? `requests ${range}` : '',
+            h('span', {}, ` · ${t.requestIds.length} req`),
+          );
+        })(),
         h('span', { style: { width: '120px', display: 'inline-block' } }, roleSplitBar(t.byRole, { compact: true })),
         h('b', { class: 'heat', style: { background: heat(t.cost) }, title: `${fmtUSD(t.cost)}: green is this session’s cheapest prompt, red its most expensive` }, fmtUSD(t.cost)),
       ),

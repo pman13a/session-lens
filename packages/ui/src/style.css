@@ -179,6 +179,8 @@ td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .turn[open] summary::before { content: '▾'; }
 .turn table { margin-top: 6px; }
 .heat { display: inline-block; min-width: 64px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
+.turn summary .prompt-no { flex: none; color: var(--text-secondary); font-weight: 600; font-size: 12px; min-width: 64px; }
+.turn summary .req-range { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .turn summary .heat { flex: none; min-width: 72px; text-align: right; padding: 1px 8px; border-radius: 6px; color: #fff; font-variant-numeric: tabular-nums; }
 
 .raw { position: fixed; right: 0; top: 0; bottom: 0; width: min(640px, 100vw); background: var(--surface-1); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12); display: flex; flex-direction: column; z-index: 20; }

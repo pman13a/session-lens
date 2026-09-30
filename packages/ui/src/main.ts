@@ -864,7 +864,8 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   let thread = compThread.get(d.session.id) ?? '';
   let xMode = store.get('xMode', store.get('accAxis', 'request')) as 'request' | 'time';
   let mode = store.get('compMode', 'tokens') as 'tokens' | 'share';
-  let costScale = store.get('costScale', 'typical') as 'full' | 'typical';
+  // Uncapped by default; capping is opt-in (new key, so an old saved 'Typical' doesn't carry over).
+  let costScale = store.get('costCap', 'full') as 'full' | 'typical';
   let colorBy = store.get('colorBy', 'kind') as 'kind' | 'who';
   const legendHolder = h('div');
   // Subagent cost, drawn on the main-thread request that launched it.
@@ -905,7 +906,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     (chartEl as unknown as { _chart?: unknown })._chart = res.chart;
     note.textContent = res.cap && res.clipped.length
       ? `Cost axis capped at ${fmtUSD(res.cap)} so everyday requests are readable. Above it: ${res.clipped.slice(0, 6).map((c) => `#${c.n} ${fmtUSD(c.cost)}`).join(', ')}${res.clipped.length > 6 ? ` and ${res.clipped.length - 6} more` : ''}. Hover shows the real value.`
-      : 'Drag the slider or ctrl-scroll to zoom both panels together.';
+      : 'Drag the slider or ctrl-scroll to zoom all three charts together.';
   };
   const modeSeg = seg(
     [
@@ -922,18 +923,21 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
   );
   const scaleSeg = seg(
     [
-      { key: 'typical', label: 'Typical' },
-      { key: 'full', label: 'Full scale' },
+      { key: 'full', label: 'Uncapped' },
+      { key: 'typical', label: 'Capped' },
     ],
     costScale,
     (k) => {
       costScale = k;
-      store.set('costScale', k);
-      scaleSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'typical' : 'full') === k)));
+      store.set('costCap', k);
+      scaleSeg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0 ? 'full' : 'typical') === k)));
       draw();
     },
   );
-  scaleSeg.title = 'Cost axis: Typical caps rare spikes so everyday requests are readable';
+  scaleSeg.title = 'Capped: the axis stops at 1.5× the 95th percentile so everyday requests are readable; spikes are clipped and listed below';
+  // Sits on the Cost per request chart itself, level with its title.
+  const scaleHolder = h('div', { class: 'panel-control', style: { top: 'calc(45% - 2px)' } }, scaleSeg);
+  const chartWrap = h('div', { style: { position: 'relative' } }, chartEl, scaleHolder);
   const colorSeg = seg(
     [
       { key: 'kind', label: 'By content' },
@@ -962,7 +966,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     },
   );
   xSeg.title = 'All three panels: requests evenly spaced, or placed at the time they ran';
-  const actions: Node[] = [xSeg, colorSeg, modeSeg, scaleSeg];
+  const actions: Node[] = [xSeg, colorSeg, modeSeg];
   if (d.subagents.length)
     actions.unshift(
       h(
@@ -984,7 +988,7 @@ function timelineCard(points: CompositionPoint[], reqs: RequestRow[], d: Session
     'Three charts on one axis: zoom, hover and By request / By time move them together. Click any chart to open that request.',
     actions,
     legendHolder,
-    chartEl,
+    chartWrap,
     note,
   );
   queueMicrotask(draw);

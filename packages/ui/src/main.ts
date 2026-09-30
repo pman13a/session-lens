@@ -265,7 +265,7 @@ const PAGE_KIND: Partial<Record<Route['view'], string>> = { day: 'Day', session:
  * a Back button to the level above, what kind of page this is, and its title, so it never reads as the
  * overview.
  */
-function setCrumbs(parts: { label: string; href?: string }[]) {
+function setCrumbs(parts: { label: string; href?: string }[], actions: Node[] = []) {
   crumbs.replaceChildren();
   const trail = h('div', { class: 'trail' });
   parts.forEach((p, i) => {
@@ -284,6 +284,7 @@ function setCrumbs(parts: { label: string; href?: string }[]) {
   crumbs.append(
     h('a', { class: 'btn back', href: parent.href!, title: `Back to ${parent.label}` }, `← ${parent.label}`),
     h('div', { class: 'page-title' }, trail, h('div', { class: 'kind' }, PAGE_KIND[view]!), h('h1', { title: current.label }, current.label)),
+    ...(actions.length ? [h('div', { class: 'page-actions' }, ...actions)] : []),
   );
 }
 
@@ -1225,12 +1226,23 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
   const sid = d.session?.id ?? params.get('session') ?? '';
   const dayQ = day ? `?day=${day}` : '';
   const reqHref = (rid: string) => `#/request/${encodeURIComponent(rid)}?session=${encodeURIComponent(sid)}${day ? `&day=${day}` : ''}`;
-  setCrumbs([
-    { label: 'Overview', href: '#/' },
-    ...(day ? [{ label: fmtDay(day), href: `#/day/${day}` }] : []),
-    { label: d.session?.title ?? 'Session', href: `#/session/${encodeURIComponent(sid)}${dayQ}` },
-    { label: `${r.agentId ? 'Subagent request' : 'Request'} ${d.thread.index + 1} of ${d.thread.count}` },
-  ]);
+  // Previous / next request on this thread, in the page header; ← and → keys do the same.
+  requestNav = { prev: d.thread.prev && reqHref(d.thread.prev), next: d.thread.next && reqHref(d.thread.next) };
+  const nav = h(
+    'div',
+    { class: 'seg', role: 'group', 'aria-label': 'Previous or next request' },
+    h('button', { disabled: d.thread.prev ? null : 'disabled', title: 'Previous request on this thread (← key)', onclick: () => requestNav.prev && go(requestNav.prev) }, '← Previous'),
+    h('button', { disabled: d.thread.next ? null : 'disabled', title: 'Next request on this thread (→ key)', onclick: () => requestNav.next && go(requestNav.next) }, 'Next →'),
+  );
+  setCrumbs(
+    [
+      { label: 'Overview', href: '#/' },
+      ...(day ? [{ label: fmtDay(day), href: `#/day/${day}` }] : []),
+      { label: d.session?.title ?? 'Session', href: `#/session/${encodeURIComponent(sid)}${dayQ}` },
+      { label: `${r.agentId ? 'Subagent request' : 'Request'} ${d.thread.index + 1} of ${d.thread.count}` },
+    ],
+    [nav],
+  );
 
   const ui = requestUi.get(r.id) ?? { filter: 'all' as const, category: '', origin: '' };
   requestUi.set(r.id, ui);
@@ -1355,12 +1367,6 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
   let tree: ReturnType<typeof contextTreemap> | undefined;
   const disposeTree = () => tree?.dispose();
 
-  const nav = h(
-    'div',
-    { style: { display: 'flex', gap: '6px' } },
-    h('button', { class: 'btn', disabled: d.thread.prev ? null : 'disabled', onclick: () => d.thread.prev && go(reqHref(d.thread.prev)) }, '← Previous'),
-    h('button', { class: 'btn', disabled: d.thread.next ? null : 'disabled', onclick: () => d.thread.next && go(reqHref(d.thread.next)) }, 'Next →'),
-  );
 
   const outMax = Math.max(...a.output.map((o) => o.tokens), 0);
   swap(
@@ -1382,7 +1388,7 @@ async function requestView(token: number, id: string, params: URLSearchParams) {
         (a.unattributedTokens ? `"Not in transcript" (${fmtTokens(a.unattributedTokens)}) is context growth no transcript line explains, usually tool schemas loaded mid-session.` : ''),
     ),
     h('div', { class: 'note' }, h('span', { class: 'key', style: { background: roleColor(r.role) } }), ...whyParts),
-    card('What was in the context', `${a.items.length} line items`, [nav], compBar, compLegend, originBar, originLegend, treeEl),
+    card('What was in the context', `${a.items.length} line items`, [], compBar, compLegend, originBar, originLegend, treeEl),
     card(
       'Line items',
       'Click a row to read its content',
@@ -1436,6 +1442,18 @@ async function showRaw(requestId: string, item: ContextItem) {
   }
 }
 document.addEventListener('keydown', (e) => e.key === 'Escape' && closeRaw());
+
+let requestNav: { prev?: string; next?: string } = {};
+document.addEventListener('keydown', (e) => {
+  if (parseRoute().view !== 'request' || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const t = e.target as HTMLElement | null;
+  if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
+  const href = e.key === 'ArrowLeft' ? requestNav.prev : e.key === 'ArrowRight' ? requestNav.next : undefined;
+  if (href) {
+    e.preventDefault();
+    go(href);
+  }
+});
 
 
 /* ---------- Usage limits: a 1:1 counterpart of Claude's own usage page, for checking this tool ---------- */

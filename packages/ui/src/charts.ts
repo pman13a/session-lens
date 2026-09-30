@@ -1,11 +1,11 @@
 import { BarChart, LineChart, TreemapChart } from 'echarts/charts';
-import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, MarkPointComponent, TooltipComponent } from 'echarts/components';
+import { AxisPointerComponent, DataZoomComponent, GridComponent, MarkLineComponent, MarkPointComponent, TitleComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { CompositionPoint, ContextItem, CostParts, DayRow, ItemKind, ItemOrigin, RequestRole, RequestRow, UsageView } from './api';
 import { fmtDay, fmtTime, fmtTokens, fmtUSD } from './format';
 
-echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, MarkLineComponent, MarkPointComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
+echarts.use([BarChart, LineChart, TreemapChart, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent, MarkPointComponent, DataZoomComponent, AxisPointerComponent, CanvasRenderer]);
 
 /* ---------- theme from CSS custom properties ---------- */
 
@@ -558,63 +558,6 @@ const PARTS: { key: Part; label: string; slot: number }[] = [...COMPONENTS, SIDE
  * Running total of a session's cost, stacked by what it was paid for. By request (clickable, lines up
  * with the other session charts) or by clock time (shows idle gaps and bursts).
  */
-export function sessionAccumulationChart(el: HTMLElement, reqs: RequestRow[], axis: 'request' | 'time', onReq: (id: string) => void) {
-  const b = base();
-  const chart = mount(el);
-  const all = [...reqs].sort((a, b) => a.ts - b.ts);
-  const value = (r: RequestRow, k: Part) => (k === 'side' ? r.side ?? 0 : r.costParts[k] ?? 0);
-  const parts = PARTS.filter((p) => all.some((r) => value(r, p.key) > 0));
-  const running = parts.map(() => 0);
-  const rows = all.map((r) => parts.map((p, i) => (running[i] += value(r, p.key))));
-  const surface = cssVar('--surface-1');
-  const byTime = axis === 'time';
-  chart.setOption({
-    ...b,
-    grid: { left: 8, right: 16, top: 16, bottom: 8, containLabel: true },
-    tooltip: {
-      ...b.tooltip,
-      trigger: 'axis',
-      axisPointer: { type: 'line', lineStyle: { color: cssVar('--axis') } },
-      formatter: (ps: { dataIndex: number }[]) => {
-        const i = ps[0].dataIndex;
-        const r = all[i];
-        const tot = rows[i].reduce((a, v) => a + v, 0);
-        return (
-          `<div style="font-weight:600;margin-bottom:4px">#${i + 1} · ${fmtTime(r.ts)} · ${fmtUSD(tot)} so far</div>` +
-          [...parts].map((p, k) => ({ p, v: rows[i][k] })).reverse().map(({ p, v }) => row(series(p.slot), p.label, fmtUSD(v))).join('') +
-          `<div style="color:${cssVar('--text-muted')};margin-top:4px">this request ${fmtUSD(r.cost + (r.side ?? 0))} · click to open it</div>`
-        );
-      },
-    },
-    xAxis: byTime
-      ? { type: 'time', ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtTime(v).replace(/:\d\d(\s|$)/, '$1') } }
-      : { type: 'category', boundaryGap: false, data: all.map((r) => r.id), ...b.axisCommon, splitLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (_: string, i: number) => String(i + 1) } },
-    yAxis: { type: 'value', ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
-    series: parts.map((p, k) => ({
-      name: p.label,
-      type: 'line',
-      stack: 'cum',
-      step: byTime ? 'end' : undefined,
-      symbol: 'none',
-      lineStyle: { width: 1, color: surface },
-      areaStyle: { color: series(p.slot), opacity: 0.9 },
-      emphasis: { disabled: true },
-      data: byTime ? all.map((r, i) => [r.ts, rows[i][k]]) : rows.map((row) => row[k]),
-    })),
-  });
-  chart.getZr().on('click', (e) => {
-    const pt = chart.convertFromPixel({ seriesIndex: 0 }, [e.offsetX, e.offsetY]) as number[] | undefined;
-    if (!pt) return;
-    let i: number;
-    if (byTime) {
-      const t = pt[0];
-      i = all.findIndex((r, j) => r.ts <= t && (j === all.length - 1 || all[j + 1].ts > t));
-    } else i = pt[0];
-    if (i >= 0 && all[i]) onReq(all[i].id);
-  });
-  return chart;
-}
-
 /**
  * Spend accumulated day by day over the selected range, stacked by component, with the monthly limit or
  * plan fee as a reference line and the current pace carried to the end of the billing period.
@@ -736,11 +679,14 @@ export interface TimelineOptions {
   colorBy: 'kind' | 'who';
   /** Cost of the subagents each request launched, drawn on top of that request's bar. */
   launched?: Map<string, { cost: number; names: string[] }>;
+  /** Space requests evenly ('request') or place them at the time they ran ('time'). All three panels follow. */
+  xMode: 'request' | 'time';
 }
 
 /**
- * Two panels, one x axis: what filled the context on each request (top), and what that request cost
- * (bottom). Same requests, same positions, one crosshair, one zoom.
+ * Three panels, one x axis: what filled the context on each request (top), what that request cost
+ * (middle), and the cost accumulated so far (bottom). Same requests, same positions, one crosshair,
+ * one zoom. The plot areas share a fixed left edge so the panels line up exactly.
  */
 export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs: RequestRow[], opts: TimelineOptions, onReq: (id: string) => void) {
   const b = base();
@@ -775,6 +721,9 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
   const limit = Math.max(...points.map((p) => p.contextLimit), 0);
   const peak = Math.max(...points.map((p) => p.total), 0);
   const dense = ids.length > 150;
+  const byTime = opts.xMode === 'time';
+  // A value at request i, placed by position or by time.
+  const at = (i: number, v: number) => (byTime ? [points[i].ts, v] : v);
   const fmtCtx = (v: number) => (opts.mode === 'share' ? `${v.toFixed(0)}%` : fmtTokens(v));
 
   const ctxSeries = layers.map((c, ci) => ({ c, ci }))
@@ -786,25 +735,27 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
       xAxisIndex: 0,
       yAxisIndex: 0,
       symbol: 'none',
+      step: byTime ? 'end' : undefined,
       lineStyle: { width: 1, color: surface },
       areaStyle: { color: c.color, opacity: 0.9 },
       emphasis: { disabled: true },
-      data: ids.map((_, i) => ctxVal(i, ci)),
+      data: ids.map((_, i) => at(i, ctxVal(i, ci))),
       markLine:
         k === 0 && opts.mode === 'tokens' && limit && peak > limit * 0.25
           ? { silent: true, symbol: 'none', lineStyle: { color: cssVar('--critical'), width: 1, type: 'solid' }, label: { formatter: `Context limit ${fmtTokens(limit)}`, color: cssVar('--text-secondary'), position: 'insideEndTop' }, data: [{ yAxis: limit }] }
           : undefined,
     }));
-  const bar = (name: string, color: string, data: number[]) => ({
+  const bar = (name: string, color: string, values: number[]) => ({
     name,
     type: 'bar',
     stack: 'cost',
     xAxisIndex: 1,
     yAxisIndex: 1,
     barMaxWidth: 24,
-    barCategoryGap: dense ? '10%' : '30%',
-    data,
-    itemStyle: { color, borderColor: surface, borderWidth: dense ? 0 : 1 },
+    ...(byTime ? { barWidth: 3 } : { barCategoryGap: dense ? '10%' : '30%' }),
+    values,
+    data: values.map((v, i) => at(i, v)),
+    itemStyle: { color, borderColor: surface, borderWidth: dense || byTime ? 0 : 1 },
   });
   const costSeries = who
     ? roles.map((ro) => bar(ro.label, roleColor(ro.key), ids.map((id) => (byId.get(id)?.role === ro.key ? own(id) : 0))))
@@ -823,37 +774,93 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
       symbolSize: 18,
       itemStyle: { color: roleColor('subagent') },
       label: { show: false },
-      data: launchMarks.map((m) => ({ coord: [ids[m.xAxis], opts.mode === 'share' ? 100 : points[m.xAxis].total] })),
+      data: launchMarks.map((m) => ({ coord: [byTime ? points[m.xAxis].ts : ids[m.xAxis], opts.mode === 'share' ? 100 : points[m.xAxis].total] })),
     };
+  // Bottom panel: the same components as the cost bars, summed as you go.
+  const cumSeries = costSeries.map((cs) => {
+    let run = 0;
+    return {
+      name: cs.name,
+      type: 'line',
+      stack: 'cum',
+      xAxisIndex: 2,
+      yAxisIndex: 2,
+      symbol: 'none',
+      step: byTime ? 'end' : undefined,
+      lineStyle: { width: 1, color: surface },
+      areaStyle: { color: (cs.itemStyle as { color: string }).color, opacity: 0.9 },
+      emphasis: { disabled: true },
+      data: cs.values.map((v, i) => at(i, (run += v))),
+    };
+  });
+  const cumTotals: number[] = [];
+  totals.reduce((a, t, i) => (cumTotals[i] = a + t), 0);
 
-  const axisX = (i: number) => ({
-    type: 'category',
-    gridIndex: i,
-    data: ids,
-    boundaryGap: true,
-    ...b.axisCommon,
-    splitLine: { show: false },
-    // Label by the request's real position (the formatter's own index restarts inside a zoomed window).
-    axisLabel: i === 0 ? { show: false } : { ...b.axisCommon.axisLabel, formatter: (id: string) => String((pos.get(id) ?? 0) + 1) },
-    axisTick: { show: false },
+  const last = 2;
+  // Sessions often span days: add the date once the thread runs longer than a day.
+  const multiDay = points.length > 1 && points[points.length - 1].ts - points[0].ts > 20 * 3600_000;
+  const timeLabel = (v: number) =>
+    multiDay
+      ? new Date(v).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
+      : fmtTime(v).replace(/:\d\d(\s|$)/, '$1');
+  const axisX = (i: number) =>
+    byTime
+      ? {
+          type: 'time',
+          gridIndex: i,
+          ...b.axisCommon,
+          splitLine: { show: false },
+          axisLabel: i === last ? { ...b.axisCommon.axisLabel, formatter: timeLabel, hideOverlap: true } : { show: false },
+          axisTick: { show: false },
+        }
+      : {
+          type: 'category',
+          gridIndex: i,
+          data: ids,
+          boundaryGap: true,
+          ...b.axisCommon,
+          splitLine: { show: false },
+          // Label by the request's real position (the formatter's own index restarts inside a zoomed window).
+          axisLabel: i === last ? { ...b.axisCommon.axisLabel, formatter: (id: string) => String((pos.get(id) ?? 0) + 1) } : { show: false },
+          axisTick: { show: false },
+        };
+  // Fixed plot edges (no containLabel): each panel's y labels differ in width, which would shift its plot.
+  const LEFT = 64;
+  const RIGHT = 16;
+  // Each panel gets its own title, set just above its plot.
+  const panelTitle = (text: string, sub: string, top: number | string) => ({
+    text,
+    subtext: sub,
+    left: 0,
+    top,
+    itemGap: 4,
+    textStyle: { color: cssVar('--text-primary'), fontSize: 13, fontWeight: 600 },
+    subtextStyle: { color: cssVar('--text-muted'), fontSize: 11 },
   });
   chart.setOption({
     ...b,
     axisPointer: { link: [{ xAxisIndex: 'all' }], lineStyle: { color: cssVar('--axis') } },
-    grid: [
-      { left: 8, right: 16, top: 12, height: '52%', containLabel: true },
-      { left: 8, right: 16, top: '63%', bottom: 44, containLabel: true },
+    title: [
+      panelTitle('What filled the context', opts.mode === 'share' ? 'Share of the context on each request' : 'Tokens in the context on each request', 0),
+      panelTitle('Cost per request', cap ? `Axis capped at ${fmtUSD(cap)}; hover shows the real value` : 'What each request cost', '45%'),
+      panelTitle('Cost accumulated over the session', `${fmtUSD(cumTotals[cumTotals.length - 1] ?? 0)} by the last request`, '71%'),
     ],
-    xAxis: [axisX(0), axisX(1)],
+    grid: [
+      { left: LEFT, right: RIGHT, top: 48, height: '34%' },
+      { left: LEFT, right: RIGHT, top: '50.5%', height: '16%' },
+      { left: LEFT, right: RIGHT, top: '76.5%', bottom: 50 },
+    ],
+    xAxis: [axisX(0), axisX(1), axisX(2)],
     yAxis: [
       { type: 'value', gridIndex: 0, max: opts.mode === 'share' ? 100 : (v: { max: number }) => niceCeil(v.max * 1.04), ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: fmtCtx } },
       { type: 'value', gridIndex: 1, max: cap, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
+      { type: 'value', gridIndex: 2, ...b.axisCommon, axisLine: { show: false }, axisLabel: { ...b.axisCommon.axisLabel, formatter: (v: number) => fmtUSD(v) } },
     ],
     dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: opts.zoom?.start ?? 0, end: opts.zoom?.end ?? 100, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false },
+      { type: 'inside', xAxisIndex: [0, 1, 2], start: opts.zoom?.start ?? 0, end: opts.zoom?.end ?? 100, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false },
       {
         type: 'slider',
-        xAxisIndex: [0, 1],
+        xAxisIndex: [0, 1, 2],
         bottom: 6,
         height: 18,
         start: opts.zoom?.start ?? 0,
@@ -863,7 +870,7 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
         backgroundColor: 'transparent',
         dataBackground: { lineStyle: { color: cssVar('--axis') }, areaStyle: { color: cssVar('--surface-2') } },
         textStyle: { color: cssVar('--text-muted'), fontSize: 11 },
-        labelFormatter: (v: number) => `#${Math.round(v) + 1}`,
+        labelFormatter: (v: number) => (byTime ? timeLabel(v) : `#${Math.round(v) + 1}`),
       },
     ],
     tooltip: {
@@ -898,25 +905,31 @@ export function timelineChart(el: HTMLElement, points: CompositionPoint[], reqs:
           `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Cost: <b style="color:${cssVar('--text-primary')}">${fmtUSD(totals[i])}</b>${cap && totals[i] > cap ? ' (clipped on the chart)' : ''}</div>` +
           costRows +
           launchedRow +
+          `<div style="color:${cssVar('--text-muted')};margin:6px 0 2px">Accumulated so far: <b style="color:${cssVar('--text-primary')}">${fmtUSD(cumTotals[i])}</b></div>` +
           `<div style="color:${cssVar('--text-muted')};margin-top:4px">${esc(r?.tools.join(', ') || 'no tool calls')} · click to open</div>`
         );
       },
     },
-    series: [...ctxSeries, ...costSeries],
+    series: [...ctxSeries, ...costSeries.map(({ values: _v, ...rest }) => rest), ...cumSeries],
   });
   chart.on('datazoom', () => {
     const dz = (chart.getOption() as { dataZoom?: { start: number; end: number }[] }).dataZoom?.[0];
     if (dz && opts.onZoom) opts.onZoom({ start: dz.start, end: dz.end });
   });
   chart.getZr().on('click', (e) => {
-    // Only clicks inside the two plot areas open a request (not the zoom slider).
+    // Only clicks inside the plot areas open a request (not the zoom slider).
     const px = [e.offsetX, e.offsetY];
-    const inTop = chart.containPixel({ gridIndex: 0 }, px);
-    const inBottom = chart.containPixel({ gridIndex: 1 }, px);
-    if (!inTop && !inBottom) return;
-    const pt = chart.convertFromPixel({ gridIndex: inBottom ? 1 : 0 }, px) as number[] | undefined;
-    const i = pt ? Math.round(pt[0]) : undefined;
-    if (i != null && ids[i]) onReq(ids[i]);
+    const g = [0, 1, 2].find((k) => chart.containPixel({ gridIndex: k }, px));
+    if (g == null) return;
+    const pt = chart.convertFromPixel({ gridIndex: g }, px) as number[] | undefined;
+    if (!pt) return;
+    let i: number;
+    if (byTime) {
+      // The request nearest in time to the click.
+      i = 0;
+      for (let k = 1; k < points.length; k++) if (Math.abs(points[k].ts - pt[0]) < Math.abs(points[i].ts - pt[0])) i = k;
+    } else i = Math.round(pt[0]);
+    if (ids[i]) onReq(ids[i]);
   });
-  return { chart, clipped: clipped.map((x) => ({ n: x.i + 1, cost: x.t })), cap };
+  return { chart, clipped: clipped.map((x) => ({ n: x.i + 1, cost: x.t })), cap, total: cumTotals[cumTotals.length - 1] ?? 0 };
 }

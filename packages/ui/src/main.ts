@@ -236,7 +236,7 @@ function shell() {
           h('button', { role: 'tab', 'aria-pressed': String(parseRoute().view === 'settings'), onclick: () => go('#/settings') }, 'Settings'),
         ),
         // The Usage limits page has its own range control (UTC, like Claude's page), so hide the Explorer's.
-        h('div', { class: 'filters' }, parseRoute().view === 'overview' ? rangeSeg : null, parseRoute().view === 'settings' ? null : projectSel, billingSlot),
+        h('div', { class: 'filters' }, parseRoute().view === 'overview' ? rangeSeg : null, ['overview', 'day', 'usage'].includes(parseRoute().view) ? projectSel : null, billingSlot),
         h('div', { class: 'spacer' }),
         liveBadge,
         refreshBtn,

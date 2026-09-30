@@ -1117,11 +1117,11 @@ async function sessionView(token: number, id: string, day?: string) {
     };
     return Object.assign(color, { ratio, strength });
   };
-  // Prompt level, two heat maps: the call your message started, and Claude's work for it, each against
-  // the same figure for every other prompt in the session.
+  // Prompt level: one scale shared by both columns (your prompt call and Claude's work), built from every
+  // value in either, so the same color means the same money in both. The request level stays per prompt.
   const pkgs = promptPackages(d);
-  const heat = heatScale(pkgs.filter((p) => p.hasPrompt).map((p) => p.prompt));
-  const workHeat = heatScale(pkgs.map((p) => p.work));
+  const heat = heatScale([...pkgs.filter((p) => p.hasPrompt).map((p) => p.prompt), ...pkgs.map((p) => p.work)]);
+  const workHeat = heat;
   const turnEl = (t: SessionDetail['turns'][number], i: number) =>
     h(
       'details',
@@ -1160,9 +1160,9 @@ async function sessionView(token: number, id: string, day?: string) {
         })(),
         h('span', { class: 'who' }, roleSplitBar(t.byRole, { compact: true })),
         pkgs[i].hasPrompt
-          ? h('b', { class: 'heat', style: { background: heat(pkgs[i].prompt) }, title: `Your prompt call: ${fmtUSD(pkgs[i].prompt)}. Colored against the other prompt calls in this session.` }, fmtUSD(pkgs[i].prompt))
+          ? h('b', { class: 'heat', style: { background: heat(pkgs[i].prompt) }, title: `Your prompt call: ${fmtUSD(pkgs[i].prompt)}. Same color scale as Claude’s work, across every prompt in this session.` }, fmtUSD(pkgs[i].prompt))
           : h('span', { class: 'heat-empty', title: 'No call from your message in this group' }, '—'),
-        h('b', { class: 'heat', style: { background: workHeat(pkgs[i].work) }, title: `Claude’s work for this prompt: ${fmtUSD(pkgs[i].work)} (iterations, final answer, subagents). Colored against the other prompts.` }, fmtUSD(pkgs[i].work)),
+        h('b', { class: 'heat', style: { background: workHeat(pkgs[i].work) }, title: `Claude’s work for this prompt: ${fmtUSD(pkgs[i].work)} (iterations, final answer, subagents). Same color scale as your prompt calls, across every prompt in this session.` }, fmtUSD(pkgs[i].work)),
         h('b', { class: 'total', title: 'The whole package: your call + Claude’s work' }, fmtUSD(t.cost)),
       ),
       (() => {
@@ -1244,7 +1244,7 @@ async function sessionView(token: number, id: string, day?: string) {
     h(
       'span',
       { class: 'muted', title: 'Prompts are colored against each other, and the requests inside a prompt against each other. The wider the spread (most ÷ least expensive), the stronger the colors: 10× or more is full red–green; costs close together stay neutral.' },
-      'Cost, relative to its column and level:',
+      'Cost color (prompt columns share one scale; requests inside a prompt use their own):',
     ),
     h('span', {}, 'lowest'),
     h('span', { style: { width: '90px', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg, hsl(120 70% 38%), hsl(60 70% 38%), hsl(0 70% 38%))' } }),

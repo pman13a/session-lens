@@ -8,7 +8,18 @@ At the bottom level you see every line item the model was carrying on that call:
 
 It reads the transcripts Claude Code already writes to `~/.claude/projects`. Everything runs locally, and nothing is uploaded.
 
-## Run it
+## Install (no build needed)
+
+Use one of the two files from a release. Build them yourself with `npm run release`; they land in `release/`.
+
+- **VS Code:** `session-lens-<version>.vsix`. Needs only VS Code. Install it with
+  `code --install-extension session-lens-<version>.vsix`, or go to *Extensions → … → Install from VSIX*. Then run **Session Lens: Open**.
+- **Browser:** `session-lens-<version>-portable.zip`. Needs only [Node.js](https://nodejs.org) 20 or newer. Unzip it and double-click
+  **Start Session Lens.cmd** (Windows), or run `./start-session-lens.sh` (macOS/Linux). Your browser opens on http://127.0.0.1:4317.
+
+To update, replace the file with a newer release. Your settings live in `~/.session-lens/` and carry over.
+
+## Run it from source
 
 ```sh
 git clone https://github.com/pman13a/session-lens.git

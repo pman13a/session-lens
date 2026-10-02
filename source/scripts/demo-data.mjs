@@ -64,7 +64,10 @@ function session(project, day, hour) {
   for (let k = 0; k < turns; k++) {
     const promptId = uuid();
     const text = pick(prompts);
-    push({ type: 'user', promptId, origin: { kind: 'human' }, message: { role: 'user', content: text + '\n\n' + 'Context: '.repeat(Math.floor(rnd() * 300)) } });
+    // Some prompts carry a pasted error log, as real ones do; the first prompt of some sessions is in plan mode.
+    const pasted = rnd() < 0.5 ? '\n\nHere is the error:\n' + '    at handler (src/api/orders.ts:42:17)\n'.repeat(1 + Math.floor(rnd() * 60)) : '';
+    const permissionMode = k === 0 && rnd() < 0.4 ? 'plan' : rnd() < 0.7 ? 'auto' : 'default';
+    push({ type: 'user', promptId, permissionMode, origin: { kind: 'human' }, message: { role: 'user', content: text + pasted } });
     const reminder = '<system-reminder>' + 'Project notes and conventions. '.repeat(40 + Math.floor(rnd() * 200)) + '</system-reminder>';
     push({ type: 'attachment', attachment: { type: pick(['skill_listing', 'todo_reminder', 'nested_memory']) }, rendered: [{ content: reminder }] });
     context += Math.round((text.length + reminder.length) / 2.3) + 400;

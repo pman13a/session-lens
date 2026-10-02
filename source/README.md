@@ -2,9 +2,9 @@
 
 This folder builds everything in [`../release`](../release). To just run Session Lens, go there instead.
 
-Claude's usage report shows spend per day. Session Lens starts at the same daily view and lets you click down four levels:
+Claude's usage report shows spend per day. Session Lens starts at the same daily view and lets you click down:
 
-**Day → Session → Request → what was in the context**
+**Day → Session → Prompt → Request → what was in the context**
 
 At the bottom level you see every line item the model was carrying on that call: the system prompt, each file read, each tool result, each reminder. Items are sized in tokens, flagged when they were new that turn, and clickable to read the raw content.
 
@@ -41,20 +41,22 @@ Every view updates while Claude Code works, usually within half a second of a tr
 - **VS Code status bar:** follows the session you're working in (`42% ctx · $1.23 · $17.65 today`).
 - **Shared settings:** a change made in one shell (browser, VS Code, desktop) reaches the others straight away. Writes are atomic: temp file, then rename.
 
-## The four levels
+## The levels
 
-| Overview | Session | Request |
+| Overview | Day | Session |
 |---|---|---|
-| ![Overview](../docs/1-overview.png) | ![Session](../docs/3-session.png) | ![Request](../docs/4-request.png) |
+| ![Overview](../docs/1-overview.png) | ![Day](../docs/2-day.png) | ![Session](../docs/3-session.png) |
+| **Prompts** | **Request** | **About** |
+| ![Prompts](../docs/6-prompts.png) | ![Request](../docs/4-request.png) | ![About](../docs/8-about.png) |
 
 *(Screenshots use `npm run demo` data.)*
 
 | Level | Shows | Click |
 |---|---|---|
-| Overview | Cost or tokens per day, stacked by input / cache write / cache read / output. **Spend accumulated** over the range, with your monthly limit or plan fee as a reference line and the current pace carried to the end of the billing period. Totals, sessions in range, CSV/JSON export | a day |
-| Day | That day's sessions: context-growth sparkline, peak context %, tokens, cost | a session |
-| Session | **What filled the context, and what each request cost**: two panels on one shared request axis, with context composition (tokens or % of context, against the limit) on top and that request's cost by component below. One crosshair, one zoom slider for both, one thread selector, and a *Typical* cost scale that caps rare spikes (listed, and shown in full on hover). Then **cost accumulated over the session** (running total, by request or by clock time; the steps show where a cold cache was rewritten), each prompt with the requests that answered it, and subagents | a request |
-| Request | Measured totals, a composition bar, a treemap and ranked table of every context line item, "added this turn" filter, prev/next, and the response's own blocks | an item, to read its raw text |
+| Overview | Cost or tokens per day, stacked by input, cache write, cache read and output. **Spend accumulated** over the range against your monthly limit or plan fee, with the pace to the end of the billing period. **Who made the calls** (your prompts, Claude iterating, subagents). Live sessions, sessions in range, CSV/JSON export | a day |
+| Day | That day's sessions: context-growth sparkline, peak context %, tokens, cost (with subagent share) | a session |
+| Session | A page header with Back. **Session timeline**: four charts on one axis, one zoom and one crosshair: what filled the context (by content or by who), cost per request (uncapped or capped), **cost per prompt** (one block per prompt, split into your call and Claude's work) and cost accumulated; *By request* or *By time*. **Prompts**: one row per prompt with request count, mode (plan highlighted), model, the timeline request range, and **your prompt vs Claude's work** heat-mapped on one scale, plus a Top 10 toggle, a mode filter and the full prompt on hover. Expand a prompt for its requests, numbered as on the timeline and heat-mapped within the prompt. Then subagents and who launched them | a request |
+| Request | Why this call happened, measured totals, the context split by kind and by who put it there, a treemap and table of every line item, "added this turn", the response's own blocks. Previous/Next buttons and the ← → keys | an item, to read its raw text |
 
 ## Your calls vs Claude's own
 
@@ -186,16 +188,19 @@ The **Settings** tab covers everything below, so you rarely need to edit the fil
 ## Layout
 
 ```
-packages/core   parse, dedupe, price, aggregate, context attribution, JSON API, HTTP server
+../release/     the shareable build (committed): npm run release writes it
+../docs/        screenshots
+packages/core   parse, dedupe, price, aggregate, context attribution, roles, JSON API, HTTP server
 packages/ui     the dashboard (Vite + ECharts), one bundle for every shell
-apps/server     `session-lens` CLI
+apps/server     `session-lens` CLI (bundled into ../release/session-lens/session-lens.mjs)
 apps/vscode     editor tab + bottom-panel view + status bar, bridged over postMessage
 apps/desktop    Electron window
-scripts/        demo-data generator
+config/         pricing.json: the bundled price table
+scripts/        demo-data generator, release builder
 ```
 
 `npm test` runs the core tests.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](../LICENSE).

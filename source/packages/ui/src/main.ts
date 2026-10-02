@@ -1697,8 +1697,15 @@ let lastPeriodStart: { start: string } | undefined;
 
 async function usageLimitsView(token: number) {
   const params = { ...usageRangeParams(lastPeriodStart), group: usageState.group, interval: usageState.interval, project: state.project || undefined };
-  const v = await api<UsageView>('usage', params);
+  let v = await api<UsageView>('usage', params);
   if (token !== renderToken) return;
+  // "Last period" is counted back from this period's start, which the first fetch tells us: when the page
+  // opens on it (saved from last time), fetch once more with the right dates.
+  if (usageState.range === 'last-period' && !lastPeriodStart) {
+    lastPeriodStart = v.period;
+    v = await api<UsageView>('usage', { ...params, ...usageRangeParams(v.period) });
+    if (token !== renderToken) return;
+  }
   lastPeriodStart = v.period;
   setCrumbs([{ label: 'Usage limits' }]);
   const plan = acct?.account.subscriptionType ? acct.account.subscriptionType.replace(/^./, (c) => c.toUpperCase()) : acct ? MODE_LABEL[acct.mode] : '';

@@ -21,8 +21,9 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, 
 
 /* ---------- state ---------- */
 
-type RangeKey = '7d' | '30d' | '90d' | 'all';
+type RangeKey = 'month' | '7d' | '30d' | '90d' | 'all';
 const RANGES: { key: RangeKey; label: string; days?: number }[] = [
+  { key: 'month', label: 'This month' },
   { key: '7d', label: '7 days', days: 7 },
   { key: '30d', label: '30 days', days: 30 },
   { key: '90d', label: '90 days', days: 90 },
@@ -90,7 +91,9 @@ function drawBilling() {
 
 function rangeParams(): { from?: string; to?: string; project?: string } {
   const r = RANGES.find((x) => x.key === state.range);
-  return { from: r?.days ? daysAgo(r.days - 1) : undefined, project: state.project || undefined };
+  // This month: the 1st of the current calendar month (local time) through today.
+  const from = state.range === 'month' ? isoDay(new Date(new Date().getFullYear(), new Date().getMonth(), 1)) : r?.days ? daysAgo(r.days - 1) : undefined;
+  return { from, project: state.project || undefined };
 }
 
 /* ---------- routing ---------- */
@@ -560,6 +563,7 @@ function table<T>(rows: T[], cols: Col<T>[], opts: { id?: string; onRow?: (r: T)
 function rangeDays(sum: Summary): number {
   const r = RANGES.find((x) => x.key === state.range);
   if (r?.days) return r.days;
+  if (state.range === 'month') return new Date().getDate();
   if (!sum.range.first || !sum.range.last) return 1;
   return Math.round((Date.parse(sum.range.last) - Date.parse(sum.range.first)) / 86_400_000) + 1;
 }
@@ -570,8 +574,13 @@ function heroCostTile(cost: number, sum: Summary) {
   if (mode === 'subscription') {
     const price = acct?.planPrice;
     const days = rangeDays(sum);
-    const fee = price ? (price * days) / 30 : 0;
-    const sub = price ? `${(cost / fee).toFixed(1)}× the ${fmtUSD(fee)} of plan fee for ${days === 1 ? 'this day' : `these ${days} days`}` : 'what this usage would cost on the API';
+    const month = state.range === 'month';
+    const fee = price ? (month ? price : (price * days) / 30) : 0;
+    const sub = price
+      ? month
+        ? `${(cost / fee).toFixed(1)}× this month’s ${fmtUSD(fee)} plan fee`
+        : `${(cost / fee).toFixed(1)}× the ${fmtUSD(fee)} of plan fee for ${days === 1 ? 'this day' : `these ${days} days`}`
+      : 'what this usage would cost on the API';
     return tile('API-equivalent value', fmtUSD(cost), sub, true);
   }
   if (mode === 'team') return tile('Usage at API rates', fmtUSD(cost), `billed per token on Team / Enterprise${disc}`, true);
@@ -822,8 +831,10 @@ async function overview(token: number) {
   const accTo = isoDay(new Date());
   const accDays = Math.round((Date.parse(accTo) - Date.parse(accFrom)) / 86_400_000) + 1;
   const refBase = acct?.mode === 'subscription' ? acct.planPrice : acct?.settings.monthlyLimit;
+  // This month is the whole month's limit or fee; other ranges get it scaled to their length.
+  const whole = state.range === 'month' || accDays === 30;
   const reference = refBase
-    ? { value: (refBase * accDays) / 30, label: `${acct?.mode === 'subscription' ? 'Plan fee' : 'Monthly limit'}${accDays === 30 ? '' : ' (prorated)'}` }
+    ? { value: state.range === 'month' ? refBase : (refBase * accDays) / 30, label: `${acct?.mode === 'subscription' ? 'Plan fee' : 'Monthly limit'}${whole ? '' : ' (prorated)'}` }
     : undefined;
   const projectTo = acct && acct.period.end > accTo ? acct.period.end : undefined;
   const accSub = h('div', { class: 'sub' }, 'Running total over the range. Click a day to open it.');

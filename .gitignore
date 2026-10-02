@@ -1,6 +1,6 @@
+# Build output inside source/ (the shareable build is committed, in release/)
 node_modules/
-dist/
-*.vsix
+source/**/dist/
+source/**/*.vsix
 out/
 demo-projects/
-release/

@@ -1,8 +1,12 @@
-// Builds the two things you hand to someone who just wants to run Session Lens:
+// Builds everything in the top-level release/ folder, for people who just want to run Session Lens:
 //
-//   release/session-lens-<version>-portable.zip  one bundled script + the dashboard; needs only Node.
-//                                                Unzip, double-click "Start Session Lens.cmd".
-//   release/session-lens-<version>.vsix          the VS Code extension; needs only VS Code.
+//   release/session-lens/                 ready to run in place: double-click "Start Session Lens.cmd". Needs Node.
+//   release/session-lens-portable.zip     the same folder, zipped, to share.
+//   release/session-lens.vsix             the VS Code extension. Needs only VS Code.
+//   release/README.md                     how to run and update.
+//
+// File names stay the same from release to release, so links and instructions keep working.
+// Run from source/ (npm run release). The previous release is replaced; git history keeps old ones.
 //
 // Usage: npm run release            (both)
 //        npm run release -- --no-vsix (zip only; the .vsix step downloads VS Code's packager)
@@ -13,9 +17,10 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const root = join(dirname(fileURLToPath(import.meta.url)), '..'); // source/
+const repo = join(root, '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
-const out = join(root, 'release');
+const out = join(repo, 'release');
 const name = 'session-lens';
 const stage = join(out, name);
 const withVsix = !process.argv.includes('--no-vsix');
@@ -43,7 +48,7 @@ await build({
 // Found next to the script at run time: the dashboard and the price table.
 cpSync(join(root, 'packages/ui/dist'), join(stage, 'ui'), { recursive: true });
 cpSync(join(root, 'config/pricing.json'), join(stage, 'pricing.json'));
-cpSync(join(root, 'LICENSE'), join(stage, 'LICENSE'));
+cpSync(join(repo, 'LICENSE'), join(stage, 'LICENSE'));
 
 writeFileSync(
   join(stage, 'Start Session Lens.cmd'),
@@ -96,18 +101,45 @@ Source and VS Code extension: https://github.com/pman13a/session-lens (MIT licen
 );
 
 console.log('› zipping');
-const zipName = `${name}-${version}-portable.zip`;
+const zipName = `${name}-portable.zip`;
 writeFileSync(join(out, zipName), zip(stage, name));
 
 if (withVsix) {
   console.log('› packaging the VS Code extension');
   run('npm', ['run', 'package', '-w', 'apps/vscode']);
-  cpSync(join(root, 'apps/vscode/session-lens.vsix'), join(out, `${name}-${version}.vsix`));
+  cpSync(join(root, 'apps/vscode/session-lens.vsix'), join(out, `${name}.vsix`));
 }
 
+writeFileSync(
+  join(out, 'README.md'),
+  `# Session Lens ${version}: ready to run
+
+Nothing to build. Pick one:
+
+| | Needs | Do this |
+|---|---|---|
+| **Browser** | [Node.js](https://nodejs.org) 20+ (LTS installer) | Open \`session-lens/\` and double-click **Start Session Lens.cmd** (Windows) or run \`./start-session-lens.sh\` (macOS/Linux). Your browser opens on http://127.0.0.1:4317. Close the window to stop. |
+| **VS Code** | VS Code | \`code --install-extension session-lens.vsix\`, then run **Session Lens: Open** from the command palette. |
+| **Share it** | | Send \`session-lens-portable.zip\` (the browser version, zipped) or \`session-lens.vsix\`. |
+
+**Updating:** \`git pull\` (or replace these files with newer ones). Your prices, discounts and plan live in
+\`~/.session-lens/\` and carry over. After updating the VS Code extension, run *Developer: Reload Window*.
+
+**Options** for the browser version, added after the script name: \`--port <n>\`, \`--projects <dir>\` (another
+transcripts folder; comma-separate several), \`--no-open\`.
+
+Read **About** in the app for what the numbers mean and their limits. Model prices go stale when Anthropic
+changes them: **Settings → Check Anthropic’s prices**.
+
+These files are built from \`../source\` with \`npm run release\`; don't edit them by hand.
+`,
+);
+
 console.log('\nReady to share:');
-for (const f of readdirSync(out).filter((f) => !statSync(join(out, f)).isDirectory()))
-  console.log(`  release/${f}  (${Math.round(statSync(join(out, f)).size / 1024)} KB)`);
+for (const f of readdirSync(out)) {
+  const st = statSync(join(out, f));
+  console.log(`  release/${f}${st.isDirectory() ? '/' : `  (${Math.max(1, Math.round(st.size / 1024))} KB)`}`);
+}
 
 /* ---------- a small zip writer (deflate), so releasing needs no extra tools on any OS ---------- */
 

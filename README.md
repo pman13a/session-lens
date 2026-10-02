@@ -4,9 +4,13 @@ See how your Claude Code usage gets spent: **day → session → prompt → requ
 the context on every call, and who made each call (your prompt, Claude iterating, subagents). It reads the transcripts
 Claude Code already writes on your computer. Everything runs locally; nothing is uploaded.
 
-| Overview | Session | Request |
+| Overview | Session timeline | Prompts |
 |---|---|---|
-| ![Overview](docs/1-overview.png) | ![Session](docs/3-session.png) | ![Request](docs/4-request.png) |
+| ![Overview: cost by day, spend against your limit](docs/1-overview.png) | ![Session: context, cost per request, cost per prompt and accumulated cost on one axis](docs/3-session.png) | ![Prompts: your prompt vs Claude's work, heat-mapped, expanded to its requests](docs/6-prompts.png) |
+| **Request** | **Usage limits** | **Settings** |
+| ![Request: every line item in the context, who put it there](docs/4-request.png) | ![Usage limits: a counterpart of Claude's usage page](docs/5-usage-limits.png) | ![Settings: model prices, checked against Anthropic](docs/7-settings.png) |
+
+*(Screenshots use demo data: `cd source && npm run demo`.)*
 
 ## The two folders
 

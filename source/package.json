@@ -15,7 +15,8 @@
     "start": "node apps/server/dist/cli.js",
     "demo": "node scripts/demo-data.mjs demo-projects && node apps/server/dist/cli.js --projects demo-projects",
     "package:vscode": "npm run package -w apps/vscode",
-    "desktop": "cd apps/desktop && npm install && npm start"
+    "desktop": "cd apps/desktop && npm install && npm start",
+    "release": "node scripts/release.mjs"
   },
   "engines": {
     "node": ">=20"

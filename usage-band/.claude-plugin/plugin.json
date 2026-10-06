@@ -1,0 +1,7 @@
+{
+  "name": "usage-band",
+  "version": "0.2.0",
+  "description": "Live session cost band above the prompt: per-request and per-prompt cost, roles, context fill and month-to-date spend, after Session Lens",
+  "author": { "name": "Andrew Paskov" },
+  "types": "./types/index.d.ts"
+}

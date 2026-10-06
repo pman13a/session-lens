@@ -2,7 +2,8 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { costOf, priceOf } from './pricing'
 import {
-  bandRows,
+  bandModel,
+  cash,
   bankTurn,
   emptyMonthly,
   emptyStats,
@@ -11,7 +12,6 @@ import {
   parseUsage,
   recordStep,
   roleOf,
-  rowText,
 } from './stats'
 import type { Step } from './stats'
 
@@ -96,11 +96,29 @@ describe('parsers', () => {
 })
 
 describe('band', () => {
-  test('rows come in the order asked for', () => {
-    const rows = bandRows(emptyStats(), emptyMonthly(), 0, 120)
-    expect(rows.map(r => r.key)).toEqual(['session', 'global', 'previous', 'average', 'max', 'requests'])
-    expect(rowText(rows[0]!)).toContain('Session spend')
-    expect(rowText(rows[1]!)).toContain('Global spend unknown')
-    expect(rowText(rows[2]!)).toContain('Previous turn: none yet')
+  test('the table comes in the order asked for, empty values dimmed', () => {
+    const band = bandModel(emptyStats(), emptyMonthly(), 0)
+    expect(band.table.map(r => r.label)).toEqual(['Previous turn', 'Per turn (average)', 'Per turn (max)', 'Total requests'])
+    expect(band.table[0]!.total).toEqual({ t: '—', dim: true })
+    expect(band.table[3]!.you).toEqual({ t: '0', dim: true })
+    expect(band.global[0]!.t).toContain('unknown')
+  })
+  test('the split bar shows yours and Claude\'s in their own colors', () => {
+    let s = emptyStats()
+    s = recordStep(s, step(0, 'tool_use', usage('claude-sonnet-5-5', 250_000, 0)))
+    s = recordStep(s, step(1, 'end_turn', usage('claude-sonnet-5-5', 750_000, 0)))
+    s = bankTurn(s)
+    const split = bandModel(s, emptyMonthly(), 0).table[0]!.split
+    expect(split.map(g => [g.t.length, g.color])).toEqual([
+      [3, 'suggestion'],
+      [7, 'claude'],
+    ])
+  })
+  test('money keeps two decimals so columns line up', () => {
+    expect(cash(0)).toBe('$0.00')
+    expect(cash(0.001)).toBe('<$0.01')
+    expect(cash(0.4)).toBe('$0.40')
+    expect(cash(12.345)).toBe('$12.35')
+    expect(cash(1234.5)).toBe('$1,235')
   })
 })

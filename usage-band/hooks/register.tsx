@@ -4,7 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Monthly, Stats } from '../types'
 import {
   applyLedger,
-  bandRows,
+  bandModel,
+  CLAUDE_COLOR,
+  COL,
   bankTurn,
   detailRows,
   emptyMonthly,
@@ -17,8 +19,8 @@ import {
   parseUsage,
   recordStep,
   whoRows,
+  YOU_COLOR,
 } from './stats'
-import type { Row } from './stats'
 
 const PANE = 'usage-band-details'
 const MONTHLY_EVERY_MS = 60 * 1000
@@ -135,37 +137,66 @@ export const register: Register = on => {
 
     const s = normStats(await read($, stats))
     const m = normMonthly(await read($, monthly))
-    const now = await $.clock.now()
-    const rows = bandRows(s, m, now, e.props.bodyColumns).slice(0, Math.max(1, e.props.maxRows))
+    const band = bandModel(s, m, await $.clock.now())
+    const hasBars = e.props.bodyColumns >= COL.label + COL.total + COL.you + COL.claude + COL.split + 2
 
-    const line = (row: Row) => (
-      <Text key={row.key} wrap="truncate-end">
-        {row.segs.map(g => (
+    const label = (text: string) => (
+      <Box width={COL.label} flexShrink={0}>
+        <Text dimColor>{text}</Text>
+      </Box>
+    )
+    const cell = (width: number, c: { t: string; color?: string; dim?: boolean; bold?: boolean }) => (
+      <Box width={width} flexShrink={0} justifyContent="flex-end">
+        <Text color={c.color} dimColor={c.dim} bold={c.bold}>
+          {c.t}
+        </Text>
+      </Box>
+    )
+    const segs = (list: { t: string; color?: string; dim?: boolean; bold?: boolean }[]) => (
+      <Text wrap="truncate-end">
+        {list.map(g => (
           <Text color={g.color} dimColor={g.dim} bold={g.bold}>
             {g.t}
           </Text>
         ))}
       </Text>
     )
-    const [first, ...rest] = rows
 
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row">
-          {first !== undefined && line(first)}
-          <Text> </Text>
-          <Button
-            key="details"
-            label="Details"
-            plain
-            onPress={() => $.ui.open({ id: PANE, title: 'Usage details' })}
-          />
-          <Text> </Text>
-          <Button key="hide" label="Hide" plain onPress={() => update($, isHidden, () => true)} />
+    const rows = [
+      <Box key="session" flexDirection="row">
+        {label('Session spend')}
+        <Box flexGrow={1}>{segs(band.session)}</Box>
+        <Button
+          key="details"
+          label="Details"
+          plain
+          onPress={() => $.ui.open({ id: PANE, title: 'Usage details' })}
+        />
+        <Text> </Text>
+        <Button key="hide" label="Hide" plain onPress={() => update($, isHidden, () => true)} />
+      </Box>,
+      <Box key="global" flexDirection="row">
+        {label('Global spend')}
+        {segs(band.global)}
+      </Box>,
+      <Box key="head" flexDirection="row">
+        {label('')}
+        {cell(COL.total, { t: 'total', dim: true })}
+        {cell(COL.you, { t: 'yours', color: YOU_COLOR, bold: true })}
+        {cell(COL.claude, { t: "Claude's", color: CLAUDE_COLOR, bold: true })}
+      </Box>,
+      ...band.table.map(r => (
+        <Box key={r.key} flexDirection="row">
+          {label(r.label)}
+          {cell(COL.total, r.total)}
+          {cell(COL.you, r.you)}
+          {cell(COL.claude, r.claude)}
+          {hasBars && r.split.length > 0 && <Box marginLeft={2}>{segs(r.split)}</Box>}
         </Box>
-        {rest.map(line)}
-      </Box>
-    )
+      )),
+    ]
+
+    return <Box flexDirection="column">{rows.slice(0, Math.max(1, e.props.maxRows))}</Box>
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

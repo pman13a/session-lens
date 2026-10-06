@@ -271,90 +271,115 @@ export function split(s: Stats): { you: Agg; claude: Agg } {
   return { you, claude }
 }
 
-const YOU = ROLE_COLOR.prompt
-const CLAUDE = 'claude'
+export const YOU_COLOR = ROLE_COLOR.prompt
+export const CLAUDE_COLOR = 'claude'
 
-function youClaude(you: string, claude: string): Seg[] {
-  return [
-    { t: ' | ' },
-    { t: `yours ${you}`, color: YOU },
-    { t: ' | ' },
-    { t: `Claude's ${claude}`, color: CLAUDE },
-  ]
+/** Table money: two decimals always, so the columns line up. */
+export function cash(x: number): string {
+  if (x > 0 && x < 0.005) return '<$0.01'
+  if (x >= 1000) return `$${Math.round(x).toLocaleString('en-US')}`
+  return `$${x.toFixed(2)}`
+}
+
+export type Cell = Seg
+export type TableRow = { key: string; label: string; total: Cell; you: Cell; claude: Cell; split: Seg[] }
+export type Band = { session: Seg[]; global: Seg[]; table: TableRow[] }
+
+/** Label column and value column widths, in cells. */
+export const COL = { label: 20, total: 9, you: 9, claude: 10, split: 10 } as const
+
+function amount(x: number, color?: string, bold?: boolean): Cell {
+  return x === 0 ? { t: cash(0), dim: true } : { t: cash(x), color, bold }
+}
+
+function count(n: number, color?: string, bold?: boolean): Cell {
+  return n === 0 ? { t: '0', dim: true } : { t: String(n), color, bold }
+}
+
+function splitBar(you: number, claude: number): Seg[] {
+  return bar(
+    [
+      { value: you, color: YOU_COLOR },
+      { value: claude, color: CLAUDE_COLOR },
+    ],
+    COL.split,
+  )
 }
 
 /**
- * The band's six rows, in the order asked for: session spend, global (monthly)
- * spend, the previous turn, per-turn average, per-turn max, total requests.
- * Most important first, so a short band drops from the bottom.
+ * The band: session spend and global (monthly) spend as lines, then a table of
+ * previous turn, per-turn average, per-turn max and total requests, each split
+ * into the person's own call and Claude's work. Most important first, so a
+ * short band drops from the bottom.
  */
-export function bandRows(s: Stats, m: Monthly, now: number, columns: number): Row[] {
-  const rows: Row[] = []
-  const barWidth = Math.max(6, Math.min(20, Math.floor(columns / 8)))
+export function bandModel(s: Stats, m: Monthly, now: number): Band {
+  const session: Seg[] = [
+    { t: s.ledgerUsd === null ? 'n/a' : cash(s.ledgerUsd), bold: true },
+    { t: `  est ${cash(s.requests.sum)}`, dim: true },
+    { t: '  ·  ', dim: true },
+    { t: 'this turn ', dim: true },
+    s.current.usd > 0 ? { t: cash(s.current.usd), color: CLAUDE_COLOR } : { t: cash(0), dim: true },
+    ...(s.unpriced > 0 ? [{ t: '  ·  ', dim: true }, { t: `${s.unpriced} unpriced`, color: 'warning' }] : []),
+  ]
 
-  rows.push({
-    key: 'session',
-    segs: [
-      { t: `Session spend ${s.ledgerUsd === null ? 'n/a' : money(s.ledgerUsd)}`, bold: true },
-      { t: ` (est ${money(s.requests.sum)})`, dim: true },
-      { t: ` | this turn ${money(s.current.usd)}` },
-      ...(s.unpriced > 0 ? [{ t: ` | ${s.unpriced} unpriced`, color: 'warning' }] : []),
-    ],
-  })
-
+  let global: Seg[]
   if (m.spent !== null && m.limit !== null) {
     const percent = m.percent ?? (m.limit > 0 ? (100 * m.spent) / m.limit : 0)
-    const asOf = m.asOf === null ? '' : ` as of ${clock(m.asOf)}`
     const stale = m.asOf !== null && now - m.asOf > 15 * 60 * 1000
-    rows.push({
-      key: 'global',
-      segs: [
-        { t: `Global spend ${money(m.spent)} of ${money(m.limit)} (${pct(percent)}) `, bold: true },
-        ...bar([{ value: Math.min(percent, 100), color: fillColor(percent) }], barWidth, 100),
-        { t: asOf + (m.source === 'manual' ? ' (set by hand)' : ''), dim: !stale, color: stale ? 'warning' : undefined },
-      ],
-    })
+    global = [
+      { t: cash(m.spent), bold: true },
+      { t: ` of ${cash(m.limit)}  `, dim: true },
+      { t: pct(percent), color: fillColor(percent), bold: true },
+      { t: '  ' },
+      ...bar([{ value: Math.min(percent, 100), color: fillColor(percent) }], COL.split * 2, 100),
+      ...(m.asOf === null
+        ? []
+        : [{ t: `  as of ${clock(m.asOf)}`, dim: !stale, color: stale ? 'warning' : undefined }]),
+      ...(m.source === 'manual' ? [{ t: ' (set by hand)', dim: true }] : []),
+    ]
   } else {
-    rows.push({
-      key: 'global',
-      segs: [{ t: `Global spend unknown${m.error ? ` (${m.error})` : ''}; /usage-spend <spent> <limit> sets it`, dim: true }],
-    })
+    global = [{ t: `unknown${m.error ? ` (${m.error})` : ''}  ·  /usage-spend <spent> <limit> sets it`, dim: true }]
   }
 
   const last = s.lastTurn
-  rows.push({
-    key: 'previous',
-    segs:
-      last === null
-        ? [{ t: 'Previous turn: none yet', dim: true }]
-        : [{ t: `Previous turn ${money(last.usd)}` }, ...youClaude(money(last.youUsd), money(last.workUsd))],
-  })
-
-  rows.push({
-    key: 'average',
-    segs: [
-      { t: `Per turn (average) ${money(avg(s.turns))}` },
-      ...youClaude(money(avg(s.turnsYou)), money(avg(s.turnsWork))),
-    ],
-  })
-
-  rows.push({
-    key: 'max',
-    segs: [
-      { t: `Per turn (max) ${money(s.turns.high)}` },
-      ...youClaude(money(s.turnsYou.high), money(s.turnsWork.high)),
-    ],
-  })
-
   const { you, claude } = split(s)
-  rows.push({
-    key: 'requests',
-    segs: [
-      { t: `Total requests ${s.requests.n}` },
-      ...youClaude(`${you.n} (${money(you.sum)})`, `${claude.n} (${money(claude.sum)})`),
-    ],
-  })
-  return rows
+  const table: TableRow[] = [
+    last === null
+      ? { key: 'previous', label: 'Previous turn', total: { t: '—', dim: true }, you: { t: '—', dim: true }, claude: { t: '—', dim: true }, split: [] }
+      : {
+          key: 'previous',
+          label: 'Previous turn',
+          total: amount(last.usd, undefined, true),
+          you: amount(last.youUsd, YOU_COLOR),
+          claude: amount(last.workUsd, CLAUDE_COLOR),
+          split: splitBar(last.youUsd, last.workUsd),
+        },
+    {
+      key: 'average',
+      label: 'Per turn (average)',
+      total: amount(avg(s.turns), undefined, true),
+      you: amount(avg(s.turnsYou), YOU_COLOR),
+      claude: amount(avg(s.turnsWork), CLAUDE_COLOR),
+      split: splitBar(avg(s.turnsYou), avg(s.turnsWork)),
+    },
+    {
+      key: 'max',
+      label: 'Per turn (max)',
+      total: amount(s.turns.high, undefined, true),
+      you: amount(s.turnsYou.high, YOU_COLOR),
+      claude: amount(s.turnsWork.high, CLAUDE_COLOR),
+      split: [],
+    },
+    {
+      key: 'requests',
+      label: 'Total requests',
+      total: count(s.requests.n, undefined, true),
+      you: count(you.n, YOU_COLOR),
+      claude: count(claude.n, CLAUDE_COLOR),
+      split: splitBar(you.n, claude.n),
+    },
+  ]
+  return { session, global, table }
 }
 
 /** The pane's detail rows: what the band used to show below its six. */

@@ -5,13 +5,21 @@ A Claude Code mod that draws a live usage band above the prompt, after
 model request.
 
 ```
-Session spend $4.10 (est $4.00) | this turn $0.000        Details  Hide
-Global spend $11.77 of $75.00 (15%) ███░░░░░░░░░░░░░ as of 14:02 UTC
-Previous turn $4.00 | yours $2.00 | Claude's $2.00
-Per turn (average) $4.00 | yours $2.00 | Claude's $2.00
-Per turn (max) $4.00 | yours $2.00 | Claude's $2.00
-Total requests 3 | yours 1 ($2.00) | Claude's 2 ($2.00)
+Session spend       $4.10  est $4.00  ·  this turn $0.00        Details  Hide
+Global spend        $11.77 of $75.00  15%  ███░░░░░░░░░░░░░░░░░  as of 14:02 UTC
+                        total    yours  Claude's
+Previous turn           $4.00    $2.00     $2.00  █████░░░░░
+Per turn (average)      $4.00    $2.00     $2.00  █████░░░░░
+Per turn (max)          $4.00    $2.00     $2.00
+Total requests              3        1         2  ███░░░░░░░
 ```
+
+Colors follow your theme: **yours** is always blue and **Claude's** always
+orange, in the column headers, the amounts and the split bar beside each row,
+which shows how that row divides between the two. The monthly bar and its
+percentage go green, then yellow past 50%, then red past 80%. Zero and
+not-yet values are dimmed, and the "as of" time turns yellow when the monthly
+reading is over 15 minutes old.
 
 | Row | Where it comes from |
 |---|---|

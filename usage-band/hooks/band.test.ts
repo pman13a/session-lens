@@ -14,7 +14,7 @@ const BAND = {
   props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 160 } as never,
 } as const
 
-test('a turn through the real hooks draws the six rows', async ($, on) => {
+test('a turn through the real hooks draws the band table', async ($, on) => {
   mock.clock(on, { now: Date.UTC(2026, 9, 6, 14, 2) })
   const replies = [
     { stopReason: 'tool_use' as const, usage: u(1_000_000, 0) },
@@ -37,7 +37,7 @@ test('a turn through the real hooks draws the six rows', async ($, on) => {
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('session.start', () => ({ cwd: '/' }))
 
-  await $.session.start({ source: 'startup' } as never)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: 'hi', turnId: 't1' })
   for (let index = 0; index < 3; index++) {
     const stream = $.turn.step({ turnId: 't1', index, model: 'claude-sonnet-5-5', messageCount: 1 })
@@ -48,20 +48,24 @@ test('a turn through the real hooks draws the six rows', async ($, on) => {
   await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
 
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', ...BAND })
-  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
-  const all = texts.join('\n')
-  expect(all).toContain('Session spend $4.10')
-  expect(all).toContain('Global spend $11.77 of $75.00 (15%)')
-  expect(all).toContain('as of 14:02 UTC')
-  expect(all).toContain('Previous turn $4.00')
-  expect(all).toContain('yours $2.00')
-  expect(all).toContain("Claude's $2.00")
-  expect(all).toContain('Per turn (max) $4.00')
-  expect(all).toContain('Total requests 3')
+  const row = async (key: string) => (await ui.find({ key }))?.text ?? ''
+  expect(await row('session')).toContain('Session spend')
+  expect(await row('session')).toContain('$4.10')
+  expect(await row('session')).toContain('est $4.00')
+  expect(await row('global')).toContain('$11.77 of $75.00')
+  expect(await row('global')).toContain('15%')
+  expect(await row('global')).toContain('as of 14:02 UTC')
+  expect(await row('head')).toContain("Claude's")
+  // cells are separate Boxes, so their texts join with no spaces
+  expect(await row('previous')).toContain('Previous turn$4.00$2.00$2.00')
+  expect(await row('max')).toContain('Per turn (max)$4.00$2.00$2.00')
+  expect(await row('requests')).toContain('Total requests312')
+  const order = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(Boolean)
+  expect(order).toEqual(['session', 'global', 'head', 'previous', 'average', 'max', 'requests'])
   for (const surface of ['desktop', 'vscode'] as const) {
     const other = await $.ui.mount({ plugin: 'usage-band', surface, ...BAND })
     const t = (await other.findAll({ type: 'Text' })).map(x => x.text ?? '').join('\n')
-    expect(t).toContain('Total requests 3')
+    expect(t).toContain('Total requests')
     await other.unmount()
   }
 

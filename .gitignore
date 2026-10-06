@@ -1,6 +1,8 @@
-# Build output inside source/ (the shareable build is committed, in release/)
+# Build output inside session-lens/source/ (the shareable build is committed, in session-lens/release/)
 node_modules/
-source/**/dist/
-source/**/*.vsix
+session-lens/source/**/dist/
+session-lens/source/**/*.vsix
 out/
 demo-projects/
+# laid by the engine when the mod loads from this folder
+usage-band/.claude-plugin/types/

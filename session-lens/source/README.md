@@ -14,7 +14,7 @@ It reads the transcripts Claude Code already writes to `~/.claude/projects`. Eve
 
 ```sh
 git clone https://github.com/pman13a/session-lens.git
-cd session-lens/source
+cd session-lens/session-lens/source
 npm install
 npm run build
 npm start               # opens http://127.0.0.1:4317

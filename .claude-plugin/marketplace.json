@@ -1,0 +1,6 @@
+{
+  "name": "session-lens",
+  "description": "Claude Code usage tools from Session Lens: the usage-band mod",
+  "owner": { "name": "Andrew Paskov" },
+  "plugins": [{ "name": "usage-band", "source": "./usage-band" }]
+}

@@ -36,6 +36,7 @@ test('a turn through the real hooks draws the band table', async ($, on) => {
   }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('session.start', () => ({ cwd: '/' }))
+  on('command.run', () => ({ text: '' }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: 'hi', turnId: 't1' })
@@ -57,15 +58,28 @@ test('a turn through the real hooks draws the band table', async ($, on) => {
   expect(await row('global')).toContain('as of 14:02 UTC')
   expect(await row('head')).toContain("Claude's")
   // cells are separate Boxes, so their texts join with no spaces
-  expect(await row('previous')).toContain('Previous turn$4.00$2.00$2.00')
-  expect(await row('max')).toContain('Per turn (max)$4.00$2.00$2.00')
-  expect(await row('requests')).toContain('Total requests312')
-  const order = (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(Boolean)
-  expect(order).toEqual(['session', 'global', 'head', 'previous', 'average', 'max', 'requests'])
+  // yours, Claude's, the bar, then the total at the right
+  expect(await row('head')).toContain("yoursClaude's")
+  expect((await row('head')).indexOf('total')).toBeGreaterThan((await row('head')).indexOf("Claude's"))
+  expect(await row('previous')).toContain('Previous turn$2.00$2.00')
+  expect(await row('previous')).toContain('█$4.00')
+  const keys = async () => (await ui.findAll({ type: 'Box' })).map(b => b.key).filter(Boolean)
+  // Compact by default: the previous turn alone. More adds the per-turn and total rows; Less folds them.
+  expect(await keys()).toEqual(['session', 'global', 'head', 'previous'])
+  expect((await ui.find({ key: 'more' }))?.text).toContain('More')
+  await ui.press({ key: 'more' })
+  expect(await keys()).toEqual(['session', 'global', 'head', 'previous', 'average', 'max', 'requests'])
+  expect((await ui.find({ key: 'more' }))?.text).toContain('Less')
+  expect(await row('max')).toContain('Per turn (max)$2.00$2.00$4.00')
+  expect(await row('requests')).toContain('Total requests12')
+  expect(await row('requests')).toContain('█3')
+  await ui.press({ key: 'more' })
+  expect(await keys()).toEqual(['session', 'global', 'head', 'previous'])
+
   for (const surface of ['desktop', 'vscode'] as const) {
     const other = await $.ui.mount({ plugin: 'usage-band', surface, ...BAND })
     const t = (await other.findAll({ type: 'Text' })).map(x => x.text ?? '').join('\n')
-    expect(t).toContain('Total requests')
+    expect(t).toContain('Previous turn')
     await other.unmount()
   }
 
@@ -82,6 +96,10 @@ test('a turn through the real hooks draws the band table', async ($, on) => {
   expect(paneText).toContain('Who made the calls')
   expect(paneText).toContain('sonnet-5-5')
   await pane.unmount()
+
+  const answered = await $.command.run({ command: 'usage-band', args: '' } as never)
+  expect(answered.text).toContain("yours  Claude's    total")
+  expect(answered.text).toContain('Total requests')
 
   await ui.press({ key: 'hide' })
   expect((await ui.find({ key: 'show' }))).toBeDefined()

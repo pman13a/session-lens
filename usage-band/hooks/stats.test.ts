@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { costOf, priceOf } from './pricing'
 import {
   bandModel,
+  bandText,
   cash,
   bankTurn,
   emptyMonthly,
@@ -113,6 +114,12 @@ describe('band', () => {
       [3, 'suggestion'],
       [7, 'claude'],
     ])
+  })
+  test('the text band puts the total after yours and Claude\'s', () => {
+    const lines = bandText(bandModel(emptyStats(), emptyMonthly(), 0)).split('\n')
+    expect(lines[3]!.trim()).toBe("yours  Claude's    total")
+    expect(lines[4]!).toContain('Previous turn')
+    expect(lines[4]!.trimEnd().endsWith('—')).toBe(true)
   })
   test('money keeps two decimals so columns line up', () => {
     expect(cash(0)).toBe('$0.00')

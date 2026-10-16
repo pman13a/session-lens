@@ -382,6 +382,20 @@ export function bandModel(s: Stats, m: Monthly, now: number): Band {
   return { session, global, table }
 }
 
+/** The band as plain text: a transcript row where no surface draws the band. */
+export function bandText(b: Band): string {
+  const text = (segs: Seg[]) => segs.map(g => g.t).join('')
+  const pad = (c: Cell, w: number) => c.t.padStart(w)
+  const head = `${''.padEnd(COL.label)}${'yours'.padStart(COL.you)}${"Claude's".padStart(COL.claude)}${'total'.padStart(COL.total)}`
+  const lines = [
+    `${'Session spend'.padEnd(COL.label)}${text(b.session)}`,
+    `${'Global spend'.padEnd(COL.label)}${text(b.global)}`,
+    head,
+    ...b.table.map(r => `${r.label.padEnd(COL.label)}${pad(r.you, COL.you)}${pad(r.claude, COL.claude)}${pad(r.total, COL.total)}`),
+  ]
+  return '```\n' + lines.join('\n') + '\n```'
+}
+
 /** The pane's detail rows: what the band used to show below its six. */
 export function detailRows(s: Stats, columns: number): Row[] {
   const barWidth = Math.max(10, Math.min(30, Math.floor(columns / 4)))

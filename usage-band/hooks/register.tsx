@@ -5,6 +5,7 @@ import type { Monthly, Stats } from '../types'
 import {
   applyLedger,
   bandModel,
+  bandText,
   CLAUDE_COLOR,
   COL,
   bankTurn,
@@ -76,6 +77,10 @@ export const register: Register = on => {
       argumentHint: '<spent> <limit> [percent]',
     })
     await $.command.register({
+      name: 'usage-band',
+      description: 'Show the usage band as text, for a session with no band to draw in (a cloud session)',
+    })
+    await $.command.register({
       name: 'usage-details',
       description: 'Open the usage details pane: context, roles, cost parts, every request',
     })
@@ -115,6 +120,12 @@ export const register: Register = on => {
     const now = await $.clock.now()
     await editMonthly($, () => ({ ...got, asOf: now, source: 'manual', error: null }))
     return { text: `Month to date set to ${money(got.spent)} of ${money(got.limit)}.` }
+  })
+
+  on('command.run', { command: 'usage-band' }, async $ => {
+    const s = normStats(await read($, stats))
+    const m = normMonthly(await read($, monthly))
+    return { text: bandText(bandModel(s, m, await $.clock.now())) }
   })
 
   on('command.run', { command: 'usage-details' }, async $ => {
@@ -181,17 +192,23 @@ export const register: Register = on => {
       </Box>,
       <Box key="head" flexDirection="row">
         {label('')}
-        {cell(COL.total, { t: 'total', dim: true })}
         {cell(COL.you, { t: 'yours', color: YOU_COLOR, bold: true })}
         {cell(COL.claude, { t: "Claude's", color: CLAUDE_COLOR, bold: true })}
+        {hasBars && <Box width={COL.split + 2} flexShrink={0} />}
+        {cell(COL.total, { t: 'total', dim: true })}
       </Box>,
       ...band.table.map(r => (
         <Box key={r.key} flexDirection="row">
           {label(r.label)}
-          {cell(COL.total, r.total)}
           {cell(COL.you, r.you)}
           {cell(COL.claude, r.claude)}
-          {hasBars && r.split.length > 0 && <Box marginLeft={2}>{segs(r.split)}</Box>}
+          {/* the max row has no bar: a blank of the same width keeps the totals aligned */}
+          {hasBars && (
+            <Box width={COL.split + 2} flexShrink={0} marginLeft={2}>
+              {r.split.length > 0 && segs(r.split)}
+            </Box>
+          )}
+          {cell(COL.total, r.total)}
         </Box>
       )),
     ]

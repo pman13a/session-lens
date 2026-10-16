@@ -7,16 +7,18 @@ model request.
 ```
 Session spend       $4.10  est $4.00  ·  this turn $0.00        Details  Hide
 Global spend        $11.77 of $75.00  15%  ███░░░░░░░░░░░░░░░░░  as of 14:02 UTC
-                        total    yours  Claude's
-Previous turn           $4.00    $2.00     $2.00  █████░░░░░
-Per turn (average)      $4.00    $2.00     $2.00  █████░░░░░
-Per turn (max)          $4.00    $2.00     $2.00
-Total requests              3        1         2  ███░░░░░░░
+                        yours  Claude's                 total
+Previous turn           $2.00     $2.00  █████░░░░░     $4.00
+Per turn (average)      $2.00     $2.00  █████░░░░░     $4.00
+Per turn (max)          $2.00     $2.00                 $4.00
+Total requests              1         2  ███░░░░░░░         3
 ```
 
 Colors follow your theme: **yours** is always blue and **Claude's** always
 orange, in the column headers, the amounts and the split bar beside each row,
-which shows how that row divides between the two. The monthly bar and its
+which shows how that row divides between the two; the row's total sits to
+the right of the bar. (The max row has no bar: its three maxes can come from
+different turns.) The monthly bar and its
 percentage go green, then yellow past 50%, then red past 80%. Zero and
 not-yet values are dimmed, and the "as of" time turns yellow when the monthly
 reading is over 15 minutes old.
@@ -29,7 +31,9 @@ reading is over 15 minutes old.
 | Per turn (average), (max) | The same split over every prompt of the session. Each max is taken on its own, so the three can come from different prompts. |
 | Total requests | Model requests counted, and their cost, split the same way. |
 
-**Details** (or `/usage-details`) opens a pane with the context fill, a role bar,
+`/usage-band` prints the same rows as a text table in the transcript, for
+sessions that have no band to draw in (a cloud session viewed in the Claude
+app). **Details** (or `/usage-details`) opens a pane with the context fill, a role bar,
 cost by component (input, cache write, cache read, output), the `Seen:`
 diagnostics, Session Lens's "who made the calls" table, and every request, newest
 first. **Hide** folds the band to one line with a **Show** button.

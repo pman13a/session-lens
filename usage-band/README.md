@@ -36,7 +36,10 @@ sessions that have no band to draw in (a cloud session viewed in the Claude
 app). **Details** (or `/usage-details`) opens a pane with the context fill, a role bar,
 cost by component (input, cache write, cache read, output), the `Seen:`
 diagnostics, Session Lens's "who made the calls" table, and every request, newest
-first. **Hide** folds the band to one line with a **Show** button.
+first. The band has three sizes. By default it shows Session spend, Global spend and
+the previous turn. **More** adds the per-turn average, the per-turn max and the
+total requests; **Less** folds them again. **Hide** folds the whole band to one
+line with a **Show** button.
 
 ## Install
 

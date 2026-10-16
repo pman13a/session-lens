@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Monthly, Stats } from '../types'
+import type { Monthly, Stats, View } from '../types'
 import {
   applyLedger,
   bandModel,
@@ -29,6 +29,7 @@ const MONTHLY_EVERY_MS = 60 * 1000
 const stats = atom({ plugin: 'usage-band', key: 'stats' } as const, emptyStats())
 const monthly = atom({ plugin: 'usage-band', key: 'monthly' } as const, emptyMonthly())
 const isHidden = atom({ plugin: 'usage-band', key: 'isHidden' } as const, false)
+const view = atom({ plugin: 'usage-band', key: 'view' } as const, 'compact' as View)
 
 /** When get_usage was last asked; a reload asks again, which is harmless. */
 let lastAsked = -Infinity
@@ -149,6 +150,9 @@ export const register: Register = on => {
     const s = normStats(await read($, stats))
     const m = normMonthly(await read($, monthly))
     const band = bandModel(s, m, await $.clock.now())
+    const isFull = (await read($, view)) === 'full'
+    // Compact shows the previous turn alone; More adds the per-turn and total rows.
+    const table = isFull ? band.table : band.table.filter(r => r.key === 'previous')
     const hasBars = e.props.bodyColumns >= COL.label + COL.total + COL.you + COL.claude + COL.split + 2
 
     const label = (text: string) => (
@@ -178,6 +182,13 @@ export const register: Register = on => {
         {label('Session spend')}
         <Box flexGrow={1}>{segs(band.session)}</Box>
         <Button
+          key="more"
+          label={isFull ? 'Less' : 'More'}
+          plain
+          onPress={() => update($, view, v => (v === 'full' ? 'compact' : 'full'))}
+        />
+        <Text> </Text>
+        <Button
           key="details"
           label="Details"
           plain
@@ -197,7 +208,7 @@ export const register: Register = on => {
         {hasBars && <Box width={COL.split + 2} flexShrink={0} />}
         {cell(COL.total, { t: 'total', dim: true })}
       </Box>,
-      ...band.table.map(r => (
+      ...table.map(r => (
         <Box key={r.key} flexDirection="row">
           {label(r.label)}
           {cell(COL.you, r.you)}

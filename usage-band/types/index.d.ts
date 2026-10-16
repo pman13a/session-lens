@@ -40,6 +40,9 @@ export type Stats = {
   log: Req[]
 }
 
+/** How much of the band shows: the first three rows, or all of them. */
+export type View = 'compact' | 'full'
+
 export type Monthly = {
   spent: number | null
   limit: number | null
@@ -52,6 +55,6 @@ export type Monthly = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'usage-band': { stats: Stats; monthly: Monthly; isHidden: boolean }
+    'usage-band': { stats: Stats; monthly: Monthly; isHidden: boolean; view: View }
   }
 }

@@ -5,7 +5,7 @@ A Claude Code mod that draws a live usage band above the prompt, after
 model request.
 
 ```
-Session spend       $4.10  est $4.00  ·  this turn $0.00        Details  Hide
+Session spend       $4.10  ·  this turn $0.00        Details  Hide
 Global spend        $11.77 of $75.00  15%  ███░░░░░░░░░░░░░░░░░  as of 14:02 UTC
                         yours  Claude's                 total
 Previous turn           $2.00     $2.00  █████░░░░░     $4.00
@@ -25,7 +25,7 @@ reading is over 15 minutes old.
 
 | Row | Where it comes from |
 |---|---|
-| Session spend | The engine's own ledger (`$.session.usage().cost.usd`). `est` is this mod's sum of priced requests, so the gap between the two is visible. |
+| Session spend | The engine's own ledger (`$.session.usage().cost.usd`) and nothing else. The mod's own sum of priced requests runs below the ledger and is no longer shown beside it; it still feeds the per-turn and request rows. |
 | Global spend | The month to date, from the app's `ccd_session_mgmt` `get_usage` (`plan.extraUsage`), asked at most once a minute. The time turns yellow when the reading is over 15 minutes old. `/usage-spend <spent> <limit>` sets it by hand. |
 | Previous turn | The last finished prompt: its total, your prompt's own call ("yours") and everything after it ("Claude's": tool iterations, the answer, subagents). |
 | Per turn (average), (max) | The same split over every prompt of the session. Each max is taken on its own, so the three can come from different prompts. |

@@ -52,7 +52,7 @@ test('a turn through the real hooks draws the band table', async ($, on) => {
   const row = async (key: string) => (await ui.find({ key }))?.text ?? ''
   expect(await row('session')).toContain('Session spend')
   expect(await row('session')).toContain('$4.10')
-  expect(await row('session')).toContain('est $4.00')
+  expect(await row('session')).not.toContain('est')
   expect(await row('global')).toContain('$11.77 of $75.00')
   expect(await row('global')).toContain('15%')
   expect(await row('global')).toContain('as of 14:02 UTC')

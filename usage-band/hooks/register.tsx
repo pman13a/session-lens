@@ -65,8 +65,10 @@ async function refreshMonthly($: EngineInterface, force: boolean): Promise<void>
       return
     }
     await editMonthly($, () => ({ ...got, asOf: now, source: 'mcp', error: null }))
-  } catch {
-    await editMonthly($, m => ({ ...m, error: m.spent === null ? 'get_usage unavailable' : null }))
+  } catch (err) {
+    const why = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').slice(0, 90)
+    lastAsked = -Infinity // retry on the next turn: the app's tools may not be connected yet at session start
+    await editMonthly($, m => ({ ...m, error: m.spent === null ? `get_usage failed: ${why}` : null }))
   }
 }
 

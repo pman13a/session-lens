@@ -315,7 +315,6 @@ function splitBar(you: number, claude: number): Seg[] {
 export function bandModel(s: Stats, m: Monthly, now: number): Band {
   const session: Seg[] = [
     { t: s.ledgerUsd === null ? 'n/a' : cash(s.ledgerUsd), bold: true },
-    { t: `  est ${cash(s.requests.sum)}`, dim: true },
     { t: '  ·  ', dim: true },
     { t: 'this turn ', dim: true },
     s.current.usd > 0 ? { t: cash(s.current.usd), color: CLAUDE_COLOR } : { t: cash(0), dim: true },

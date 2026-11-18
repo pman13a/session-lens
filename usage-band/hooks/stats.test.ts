@@ -102,7 +102,7 @@ describe('band', () => {
     expect(band.table.map(r => r.label)).toEqual(['Previous turn', 'Per turn (average)', 'Per turn (max)', 'Total requests'])
     expect(band.table[0]!.total).toEqual({ t: '—', dim: true })
     expect(band.table[3]!.you).toEqual({ t: '0', dim: true })
-    expect(band.global[0]!.t).toContain('unknown')
+    expect(band.global[0]!.t).toBe('n/a')
   })
   test('the split bar shows yours and Claude\'s in their own colors', () => {
     let s = emptyStats()

@@ -153,8 +153,8 @@ export const register: Register = on => {
     const m = normMonthly(await read($, monthly))
     const band = bandModel(s, m, await $.clock.now())
     const isFull = (await read($, view)) === 'full'
-    // Compact shows the previous turn alone; More adds the per-turn and total rows.
-    const table = isFull ? band.table : band.table.filter(r => r.key === 'previous')
+    // Compact is one line: session and global spend. More adds the full table.
+    const table = band.table
     const hasBars = e.props.bodyColumns >= COL.label + COL.total + COL.you + COL.claude + COL.split + 2
 
     const label = (text: string) => (
@@ -181,8 +181,22 @@ export const register: Register = on => {
 
     const rows = [
       <Box key="session" flexDirection="row">
-        {label('Session spend')}
-        <Box flexGrow={1}>{segs(band.session)}</Box>
+        {isFull ? (
+          label('Session spend')
+        ) : (
+          <Box flexShrink={0} marginRight={1}>
+            <Text dimColor>Session spend</Text>
+          </Box>
+        )}
+        <Box flexGrow={isFull ? 1 : 0} flexShrink={0}>
+          {segs(band.session)}
+        </Box>
+        {!isFull && (
+          // slim: no bar, no timestamp, one row tall
+          <Box flexGrow={1} flexShrink={1} marginLeft={2} height={1}>
+            {segs([{ t: 'Global spend ', dim: true }, ...(m.spent !== null && m.limit !== null ? band.global.slice(0, 3) : band.global)])}
+          </Box>
+        )}
         <Button
           key="more"
           label={isFull ? 'Less' : 'More'}
@@ -199,18 +213,22 @@ export const register: Register = on => {
         <Text> </Text>
         <Button key="hide" label="Hide" plain onPress={() => update($, isHidden, () => true)} />
       </Box>,
-      <Box key="global" flexDirection="row">
-        {label('Global spend')}
-        {segs(band.global)}
-      </Box>,
-      <Box key="head" flexDirection="row">
-        {label('')}
-        {cell(COL.you, { t: 'yours', color: YOU_COLOR, bold: true })}
-        {cell(COL.claude, { t: "Claude's", color: CLAUDE_COLOR, bold: true })}
-        {hasBars && <Box width={COL.split + 2} flexShrink={0} />}
-        {cell(COL.total, { t: 'total', dim: true })}
-      </Box>,
-      ...table.map(r => (
+      ...(isFull
+        ? [
+            <Box key="global" flexDirection="row">
+              {label('Global spend')}
+              {segs(band.global)}
+            </Box>,
+            <Box key="head" flexDirection="row">
+              {label('')}
+              {cell(COL.you, { t: 'yours', color: YOU_COLOR, bold: true })}
+              {cell(COL.claude, { t: "Claude's", color: CLAUDE_COLOR, bold: true })}
+              {hasBars && <Box width={COL.split + 2} flexShrink={0} />}
+              {cell(COL.total, { t: 'total', dim: true })}
+            </Box>,
+          ]
+        : []),
+      ...(isFull ? table : []).map(r => (
         <Box key={r.key} flexDirection="row">
           {label(r.label)}
           {cell(COL.you, r.you)}

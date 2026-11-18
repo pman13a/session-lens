@@ -327,7 +327,7 @@ export function bandModel(s: Stats, m: Monthly, now: number): Band {
     const stale = m.asOf !== null && now - m.asOf > 15 * 60 * 1000
     global = [
       { t: cash(m.spent), bold: true },
-      { t: ` of ${cash(m.limit)}  `, dim: true },
+      { t: ` of ${Number.isInteger(m.limit) ? `$${m.limit.toLocaleString('en-US')}` : cash(m.limit)}  `, dim: true },
       { t: pct(percent), color: fillColor(percent), bold: true },
       { t: '  ' },
       ...bar([{ value: Math.min(percent, 100), color: fillColor(percent) }], COL.split * 2, 100),
@@ -337,7 +337,7 @@ export function bandModel(s: Stats, m: Monthly, now: number): Band {
       ...(m.source === 'manual' ? [{ t: ' (set by hand)', dim: true }] : []),
     ]
   } else {
-    global = [{ t: `unknown${m.error ? ` (${m.error})` : ''}  ·  /usage-spend <spent> <limit> sets it`, dim: true }]
+    global = [{ t: 'n/a', dim: true }]
   }
 
   const last = s.lastTurn
